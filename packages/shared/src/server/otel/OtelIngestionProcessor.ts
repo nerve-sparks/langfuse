@@ -264,6 +264,9 @@ export class OtelIngestionProcessor {
                     endTimeUnixNano: span.endTimeUnixNano,
                   });
 
+                const isLangfuseSDKSpans =
+                  scopeSpan.scope?.name?.startsWith("langfuse-sdk") ?? false;
+
                 // Extract metadata from different sources
                 const spanMetadata = this.extractMetadata(
                   spanAttributes,
@@ -274,19 +277,27 @@ export class OtelIngestionProcessor {
                   "trace",
                 );
 
-                // Extract input/output (filteredAttributes not needed as metadata.attributes is commented out)
-                // Add filteredAttributes in case spanAttributes are included in the metadata block.
-                const { input, output } = this.extractInputAndOutput({
-                  events: span?.events ?? [],
-                  attributes: spanAttributes,
-                  instrumentationScopeName: scopeSpan?.scope?.name ?? "",
-                });
+                const { input, output, filteredAttributes } =
+                  this.extractInputAndOutput({
+                    events: span?.events ?? [],
+                    attributes: spanAttributes,
+                    instrumentationScopeName: scopeSpan?.scope?.name ?? "",
+                  });
 
                 // Construct metadata object with the specified structure
+                // Match v3 path: store full scope object (name, version, attributes)
                 const metadata = {
-                  // attributes: filteredAttributes,
+                  ...(isLangfuseSDKSpans
+                    ? {}
+                    : { attributes: filteredAttributes }),
                   resourceAttributes: resourceAttributes,
-                  scopeAttributes: scopeAttributes,
+                  scope: {
+                    ...(scopeSpan.scope || {}),
+                    attributes: scopeAttributes,
+                  },
+                  // Note: top-level user metadata can overwrite `scope` here.
+                  // This preserves the v3 behavior/shape, even though it means
+                  // the instrumentation scope object is not guaranteed to win.
                   ...spanMetadata,
                   ...traceMetadata,
                 };
@@ -1293,10 +1304,6 @@ export class OtelIngestionProcessor {
       ]),
     );
 
-    // TODO: Map gen_ai.tool.definitions to input.tools for backend extraction
-    // const toolDefs = attributes["gen_ai.tool.definitions"] || attributes["model_request_parameters"]?.function_tools;
-    // if (toolDefs && input && typeof input === "object") { input = { ...input, tools: toolDefs }; }
-
     // Langfuse
     input =
       domain === "trace" && attributes[LangfuseOtelSpanAttributes.TRACE_INPUT]
@@ -1624,7 +1631,11 @@ export class OtelIngestionProcessor {
       );
     }
     if (input || output) {
-      return { input, output, filteredAttributes };
+      return {
+        input: this.appendOtelToolDefinitionsToInput(input, attributes),
+        output,
+        filteredAttributes,
+      };
     }
 
     // OpenTelemetry tools (https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans)
@@ -1635,6 +1646,77 @@ export class OtelIngestionProcessor {
     }
 
     return { input: null, output: null, filteredAttributes };
+  }
+
+  private appendOtelToolDefinitionsToInput(
+    input: unknown,
+    attributes: Record<string, unknown>,
+  ): unknown {
+    const toolDefinitions = this.extractOtelToolDefinitions(attributes);
+
+    if (!toolDefinitions || input == null) {
+      return input;
+    }
+
+    const mergeToolDefinitions = (value: unknown): unknown => {
+      if (Array.isArray(value)) {
+        return { messages: value, tools: toolDefinitions };
+      }
+
+      if (typeof value !== "object" || value == null) {
+        return null;
+      }
+
+      const inputObject = value as Record<string, unknown>;
+
+      if (inputObject.tools != null) {
+        return inputObject;
+      }
+
+      return {
+        ...inputObject,
+        tools: toolDefinitions,
+      };
+    };
+
+    if (typeof input === "string") {
+      try {
+        const parsedInput = JSON.parse(input);
+        const mergedInput = mergeToolDefinitions(parsedInput);
+        return mergedInput == null ? input : JSON.stringify(mergedInput);
+      } catch {
+        return input;
+      }
+    }
+
+    return mergeToolDefinitions(input) ?? input;
+  }
+
+  private extractOtelToolDefinitions(
+    attributes: Record<string, unknown>,
+  ): unknown[] | null {
+    const parseJsonString = (value: unknown): unknown => {
+      if (typeof value !== "string") {
+        return value;
+      }
+
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    };
+
+    const modelRequestParameters = parseJsonString(
+      attributes["model_request_parameters"],
+    ) as Record<string, unknown> | null;
+
+    const toolDefinitions = parseJsonString(
+      attributes["gen_ai.tool.definitions"] ??
+        modelRequestParameters?.function_tools,
+    );
+
+    return Array.isArray(toolDefinitions) ? toolDefinitions : null;
   }
 
   /**
