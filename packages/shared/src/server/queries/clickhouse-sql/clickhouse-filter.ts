@@ -1,5 +1,11 @@
 import { filterOperators } from "../../../interfaces/filters";
 import { clickhouseCompliantRandomCharacters } from "../../repositories";
+import {
+  ftsMetadataArrayHas,
+  ftsTextTokenConjunct,
+  isFtsEventsTable,
+  isFtsTextTarget,
+} from "./fts";
 
 export type ClickhouseOperator =
   | (typeof filterOperators)[keyof typeof filterOperators][number]
@@ -86,6 +92,10 @@ export class StringFilter implements Filter {
     // '' ≡ NULL: "does not contain" would match '' — guard against it
     if (this.emptyEqualsNull && this.operator === "does not contain") {
       query = `(${fieldWithPrefix} != '' AND ${query})`;
+    }
+
+    if (isFtsTextTarget(this.clickhouseTable, this.field, this.operator)) {
+      query = `(${query} AND ${ftsTextTokenConjunct(fieldWithPrefix, `{${varName}: String}`)})`;
     }
 
     return {
@@ -300,36 +310,38 @@ export class StringObjectFilter implements Filter {
     const varValueName = `stringObjectValueFilter${clickhouseCompliantRandomCharacters()}`;
     const prefix = this.tablePrefix ? this.tablePrefix + "." : "";
 
-    // Events tables use array columns (metadata_names/metadata_values)
-    // Observations/traces tables use Map column (metadata)
-    const isEventsTable = [
-      "events_proto",
-      "events_core",
-      "events_full",
-    ].includes(this.clickhouseTable);
-
+    // Events tables use array columns (metadata_names/metadata_values);
+    // observations/traces tables use a Map column (metadata).
     let query: string;
-    if (isEventsTable) {
-      // For events tables, use array access: {field}_values[indexOf({field}_names, key)]
+    if (isFtsEventsTable(this.clickhouseTable)) {
+      // ClickHouse's index analyzer cannot extract `has(names, k)` from
+      // `values[indexOf(names, k)] OP v` (cross-array arrayElement form), so a
+      // bloom_filter skipping index on `names` would never prune granules.
+      // Emitting an explicit `has(names, k) AND (...)` prefix conjunct makes
+      // the index actionable and corrects the absent-key matching semantic
+      // (Otherwise `arr[0] = ''` causes some predicates to match rows that never
+      // had the key — including `does not contain`).
       const namesColumn = `${prefix}${this.field}_names`;
       const valuesColumn = `${prefix}${this.field}_values`;
       const valueAccessor = `${valuesColumn}[indexOf(${namesColumn}, {${varKeyName}: String})]`;
+      const hasKey = `has(${namesColumn}, {${varKeyName}: String})`;
+      const valueParam = `{${varValueName}: String}`;
 
       switch (this.operator) {
         case "=":
-          query = `${valueAccessor} = {${varValueName}: String}`;
+          query = `${hasKey} AND ${ftsMetadataArrayHas(valuesColumn, valueParam)} AND (${valueAccessor} = ${valueParam})`;
           break;
         case "contains":
-          query = `position(${valueAccessor}, {${varValueName}: String}) > 0`;
+          query = `${hasKey} AND (position(${valueAccessor}, ${valueParam}) > 0)`;
           break;
         case "does not contain":
-          query = `position(${valueAccessor}, {${varValueName}: String}) = 0`;
+          query = `${hasKey} AND (position(${valueAccessor}, ${valueParam}) = 0)`;
           break;
         case "starts with":
-          query = `startsWith(${valueAccessor}, {${varValueName}: String})`;
+          query = `${hasKey} AND (startsWith(${valueAccessor}, ${valueParam}))`;
           break;
         case "ends with":
-          query = `endsWith(${valueAccessor}, {${varValueName}: String})`;
+          query = `${hasKey} AND (endsWith(${valueAccessor}, ${valueParam}))`;
           break;
         default:
           throw new Error(`Unsupported operator: ${this.operator}`);

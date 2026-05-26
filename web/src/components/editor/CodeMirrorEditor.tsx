@@ -17,12 +17,7 @@ import { json, jsonParseLinter } from "@codemirror/lang-json";
 import { linter, type Diagnostic } from "@codemirror/lint";
 import { useTheme } from "next-themes";
 import { cn } from "@/src/utils/tailwind";
-import {
-  useState,
-  useCallback,
-  type MutableRefObject,
-  type RefObject,
-} from "react";
+import { useState, useCallback, type RefObject } from "react";
 import { LanguageSupport, StreamLanguage } from "@codemirror/language";
 import type { StringStream } from "@codemirror/language";
 import {
@@ -49,6 +44,12 @@ const promptLanguage = StreamLanguage.define({
       return "keyword";
     }
 
+    // Extra surrounding braces are literals; the inner {{variable}} compiles.
+    if (stream.match("{{{", false)) {
+      stream.next();
+      return null;
+    }
+
     // Highlight mustache variables
     if (stream.match("{{")) {
       const start = stream.pos;
@@ -62,10 +63,8 @@ const promptLanguage = StreamLanguage.define({
   },
 });
 
-// Linter for prompt variables
-const promptLinter = linter((view) => {
+export const getPromptVariableDiagnostics = (content: string): Diagnostic[] => {
   const diagnostics: Diagnostic[] = [];
-  const content = view.state.doc.toString();
 
   // Check for multiline variables
   for (const match of content.matchAll(MULTILINE_VARIABLE_REGEX)) {
@@ -133,7 +132,12 @@ const promptLinter = linter((view) => {
   }
 
   return diagnostics;
-});
+};
+
+// Linter for prompt variables
+const promptLinter = linter((view) =>
+  getPromptVariableDiagnostics(view.state.doc.toString()),
+);
 
 // Create a language support instance that combines the language and its configuration
 const promptSupport = new LanguageSupport(promptLanguage);
@@ -309,6 +313,7 @@ const searchHighlightingSupport = StateField.define<DecorationSet>({
 export function applyCodeMirrorSearchQuery(
   editorRef: RefObject<ReactCodeMirrorRef | null> | undefined,
   searchValue: string,
+  matchRanges: { from: number; to: number }[],
 ) {
   const view = editorRef?.current?.view;
   if (!view) {
@@ -325,14 +330,6 @@ export function applyCodeMirrorSearchQuery(
     effects: setSearchQuery.of(searchQuery),
   });
 
-  const cursor = searchQuery.getCursor(view.state);
-  const matchRanges: { from: number; to: number }[] = [];
-  let current = cursor.next();
-  while (!current.done) {
-    matchRanges.push(current.value);
-    current = cursor.next();
-  }
-
   view.dispatch({
     effects: setSearchHighlightMarks.of(matchRanges),
   });
@@ -341,17 +338,23 @@ export function applyCodeMirrorSearchQuery(
 export function setActiveSearchMarkCodeMirrorRange(
   editorRef: RefObject<ReactCodeMirrorRef | null> | undefined,
   range: { from: number; to: number } | null,
+  { scrollIntoView = true }: { scrollIntoView?: boolean } = {},
 ) {
   const view = editorRef?.current?.view;
   if (!view || !range) {
     return;
   }
 
+  const effects: StateEffect<unknown>[] = [
+    setSelectedSearchHighlightMark.of(range),
+  ];
+
+  if (scrollIntoView) {
+    effects.push(EditorView.scrollIntoView(range.from));
+  }
+
   view.dispatch({
-    effects: [
-      setSelectedSearchHighlightMark.of(range),
-      EditorView.scrollIntoView(range.from),
-    ],
+    effects,
   });
 }
 
@@ -409,8 +412,7 @@ export function CodeMirrorEditor({
   const handleEditorRef = useCallback(
     (instance: ReactCodeMirrorRef | null) => {
       if (editorRef) {
-        (editorRef as MutableRefObject<ReactCodeMirrorRef | null>).current =
-          instance;
+        (editorRef as RefObject<ReactCodeMirrorRef | null>).current = instance;
       }
 
       if (instance) {

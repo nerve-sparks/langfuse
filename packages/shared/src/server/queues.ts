@@ -10,6 +10,7 @@ import { EventActionSchema } from "../domain";
 import { PromptDomainSchema } from "../domain/prompts";
 import { ObservationAddToDatasetConfigSchema } from "../features/batchAction/addToDatasetTypes";
 import { EvalTargetObjectSchema } from "../features/evals/types";
+import { JobConfigExecutionMode } from "../features/evals/evalConfigBlocking";
 
 export const IngestionEvent = z.object({
   data: z.object({
@@ -104,6 +105,7 @@ export const LLMAsJudgeExecutionEventSchema = z.object({
   projectId: z.string(),
   jobExecutionId: z.string(),
   observationS3Path: z.string(),
+  executionMode: JobConfigExecutionMode.optional(),
 });
 export const PostHogIntegrationProcessingEventSchema = z.object({
   projectId: z.string(),
@@ -329,6 +331,7 @@ export enum QueueName {
   DatasetRunItemUpsert = "dataset-run-item-upsert-queue",
   BatchExport = "batch-export-queue",
   OtelIngestionQueue = "otel-ingestion-queue",
+  OtelIngestionSecondaryQueue = "secondary-otel-ingestion-queue", // Separates high priority + high throughput projects from other projects.
   IngestionQueue = "ingestion-queue", // Process single events with S3-merge
   IngestionSecondaryQueue = "secondary-ingestion-queue", // Separates high priority + high throughput projects from other projects.
   CloudUsageMeteringQueue = "cloud-usage-metering-queue",
@@ -369,7 +372,6 @@ export enum QueueJobs {
   CloudFreeTierUsageThresholdJob = "cloud-free-tier-usage-threshold-job",
   OtelIngestionJob = "otel-ingestion-job",
   IngestionJob = "ingestion-job",
-  IngestionSecondaryJob = "secondary-ingestion-job",
   ExperimentCreateJob = "experiment-create-job",
   PostHogIntegrationJob = "posthog-integration-job",
   PostHogIntegrationProcessingJob = "posthog-integration-processing-job",
@@ -458,6 +460,12 @@ export type TQueueJobTypes = {
     name: QueueJobs.BatchExportJob;
   };
   [QueueName.OtelIngestionQueue]: {
+    timestamp: Date;
+    id: string;
+    payload: OtelIngestionEventQueueType;
+    name: QueueJobs.OtelIngestionJob;
+  };
+  [QueueName.OtelIngestionSecondaryQueue]: {
     timestamp: Date;
     id: string;
     payload: OtelIngestionEventQueueType;

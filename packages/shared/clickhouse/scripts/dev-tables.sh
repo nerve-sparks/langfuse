@@ -132,6 +132,8 @@ SETTINGS ttl_only_drop_parts = 1;
 -- Create new events table for development setups.
 -- We expect this to be fully immutable and eventually replace observations.
 -- Remove IF NOT EXISTS when moving this to prod migrations.
+SET enable_full_text_index=1;
+
 CREATE TABLE IF NOT EXISTS events_full
   (
       project_id String,
@@ -237,6 +239,18 @@ CREATE TABLE IF NOT EXISTS events_full
       INDEX idx_session_id session_id TYPE bloom_filter(0.01) GRANULARITY 1,
       INDEX idx_created_at created_at TYPE minmax GRANULARITY 1,
       INDEX idx_updated_at updated_at TYPE minmax GRANULARITY 1,
+      INDEX idx_fts_input_low lower(input) TYPE text(
+        tokenizer = splitByNonAlpha
+      ),
+      INDEX idx_fts_output_low lower(output) TYPE text(
+        tokenizer = splitByNonAlpha
+      ),
+      INDEX idx_fts_metadata_values metadata_values TYPE text(
+        tokenizer = splitByNonAlpha
+      ),
+      INDEX idx_fts_metadata_names metadata_names TYPE text(
+        tokenizer = splitByNonAlpha
+      ),
 
       -- Full Text Search Indexes (We should try different index sizes, e.g. 2048, 4096, or 8192)
       -- Add after backfill as they limit backfill throughput performance
@@ -373,7 +387,14 @@ CREATE TABLE IF NOT EXISTS events_core
     INDEX idx_created_at created_at TYPE minmax GRANULARITY 1,
     INDEX idx_updated_at updated_at TYPE minmax GRANULARITY 1,
     INDEX idx_provided_model_name provided_model_name TYPE bloom_filter(0.01) GRANULARITY 2,
-    INDEX idx_experiment_id experiment_id TYPE bloom_filter(0.01) GRANULARITY 1
+    INDEX idx_experiment_id experiment_id TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_metadata_names metadata_names TYPE bloom_filter(0.01) GRANULARITY 1,
+    INDEX idx_fts_metadata_values metadata_values TYPE text(
+        tokenizer = splitByNonAlpha
+    ),
+    INDEX idx_fts_metadata_names metadata_names TYPE text(
+        tokenizer = splitByNonAlpha
+    )
 )
 ENGINE = ReplacingMergeTree(event_ts, is_deleted)
 PARTITION BY toYYYYMM(start_time)
@@ -456,6 +477,52 @@ SELECT
     event_ts,
     is_deleted
 FROM events_full;
+
+-- Diagnostic table to track event size distributions across projects.
+-- Every insert (including updates) produces a row — no deduplication.
+-- See LFE-9402 for context.
+CREATE TABLE IF NOT EXISTS ingestion_size_stats (
+    project_id String,
+    trace_id String,
+    span_id String,
+    created_at DateTime64(3),
+    input_size UInt64,
+    output_size UInt64,
+    metadata_size UInt64,
+    total_size UInt64
+) ENGINE = MergeTree
+PRIMARY KEY (toStartOfHour(created_at), project_id)
+ORDER BY (toStartOfHour(created_at), project_id, trace_id, span_id, created_at);
+
+-- MV: observations -> ingestion_size_stats
+CREATE MATERIALIZED VIEW IF NOT EXISTS ingestion_size_stats_observations_mv
+TO ingestion_size_stats AS
+SELECT
+    project_id,
+    trace_id,
+    id AS span_id,
+    created_at,
+    length(coalesce(input, '')) AS input_size,
+    length(coalesce(output, '')) AS output_size,
+    arraySum(arrayMap(k -> length(k), mapKeys(metadata)))
+      + arraySum(arrayMap(v -> length(v), mapValues(metadata))) AS metadata_size,
+    byteSize(*) AS total_size
+FROM observations;
+
+-- MV: traces -> ingestion_size_stats
+CREATE MATERIALIZED VIEW IF NOT EXISTS ingestion_size_stats_traces_mv
+TO ingestion_size_stats AS
+SELECT
+    project_id,
+    id AS trace_id,
+    concat('t-', id) AS span_id,
+    created_at,
+    length(coalesce(input, '')) AS input_size,
+    length(coalesce(output, '')) AS output_size,
+    arraySum(arrayMap(k -> length(k), mapKeys(metadata)))
+      + arraySum(arrayMap(v -> length(v), mapValues(metadata))) AS metadata_size,
+    byteSize(*) AS total_size
+FROM traces;
 
 CREATE VIEW analytics_events_core AS
 SELECT

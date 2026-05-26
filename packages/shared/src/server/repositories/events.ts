@@ -1,5 +1,9 @@
 import { prisma } from "../../db";
-import { Observation, EventsObservation, ObservationType } from "../../domain";
+import type {
+  EventsObservation,
+  MetadataDomain,
+  ObservationType,
+} from "../../domain";
 import { env } from "../../env";
 import { InternalServerError, LangfuseNotFoundError } from "../../errors";
 import {
@@ -46,21 +50,27 @@ import {
   RenderingProps,
 } from "../utils/rendering";
 import {
+  OBSERVATION_FIELD_GROUPS_PUBLIC_API,
+  OBSERVATION_FIELD_GROUPS_FULL,
+  type ObservationFieldGroupPublicApi,
+  type ObservationFieldGroupFull,
+} from "../../domain/observation-field-groups";
+import {
   commandClickhouse,
   parseClickhouseUTCDateTimeFormat,
   queryClickhouse,
   queryClickhouseStream,
 } from "./clickhouse";
-import { ObservationRecordReadType, TraceRecordReadType } from "./definitions";
+import {
+  EventsObservationRecordReadType,
+  TraceRecordReadType,
+} from "./definitions";
 import type { AnalyticsObservationEvent } from "../analytics-integrations/types";
 import {
   ObservationsTableQueryResult,
   ObservationTableQuery,
 } from "./observations";
-import {
-  convertEventsObservation,
-  convertObservation,
-} from "./observations_converters";
+import { convertEventsObservation } from "./observations_converters";
 import {
   EventsQueryBuilder,
   CTEQueryBuilder,
@@ -75,6 +85,27 @@ import { UiColumnMappings } from "../../tableDefinitions";
 import { eventsTableCols } from "../../eventsTable";
 import { tracesTableCols } from "../../tableDefinitions/tracesTable";
 import { parseMetadataCHRecordToDomain } from "../utils/metadata_conversion";
+
+type EventBatchIOStringOutput = {
+  id: string;
+  input: string | null;
+  output: string | null;
+  metadata: MetadataDomain;
+};
+
+const BATCH_IO_STRING_RENDERING_PROPS: RenderingProps = {
+  // Batch I/O truncation is handled in SQL via leftUTF8 for performance.
+  truncated: false,
+  shouldJsonParse: false,
+};
+
+const applyBatchIOStringRendering = (
+  io: string | null | undefined,
+): string | null => {
+  return applyInputOutputRendering(io, BATCH_IO_STRING_RENDERING_PROPS) as
+    | string
+    | null;
+};
 
 type ObservationsTableQueryResultWitouhtTraceFields = Omit<
   ObservationsTableQueryResult,
@@ -95,7 +126,7 @@ async function enrichObservationsWithModelData(
   observationRecords: Array<ObservationsTableQueryResultWitouhtTraceFields>,
   projectId: string,
   parseIoAsJson: boolean,
-  requestedFields: ObservationFieldGroup[],
+  requestedFields: ObservationFieldGroupPublicApi[],
 ): Promise<Array<EventsObservationPublic>>;
 async function enrichObservationsWithModelData(
   observationRecords: Array<ObservationsTableQueryResultWitouhtTraceFields>,
@@ -107,7 +138,7 @@ async function enrichObservationsWithModelData(
   observationRecords: Array<ObservationsTableQueryResultWitouhtTraceFields>,
   projectId: string,
   parseIoAsJson: boolean,
-  requestedFields: ObservationFieldGroup[] | null,
+  requestedFields: ObservationFieldGroupPublicApi[] | null,
 ): Promise<
   Array<(EventsObservation & ObservationPriceFields) | EventsObservationPublic>
 > {
@@ -193,18 +224,22 @@ async function enrichObservationsWithModelData(
 async function enrichObservationsWithTraceFields(
   observationRecords: Array<EventsObservation & ObservationPriceFields>,
 ): Promise<FullEventsObservations> {
-  return observationRecords.map((o) => {
+  return observationRecords.map((observation) => {
+    // Remove raw tags field as this is re-mapped to traceTags
+    const { tags: _tags, ...observationWithoutRawTags } = observation;
     return {
-      ...o,
-      traceTags: [], // TODO pull from PG
+      ...observationWithoutRawTags,
+      traceTags: observation.tags ?? [],
       traceTimestamp: null,
-      toolDefinitions: o.toolDefinitions ?? null,
-      toolCalls: o.toolCalls ?? null,
+      toolDefinitions: observation.toolDefinitions ?? null,
+      toolCalls: observation.toolCalls ?? null,
       // Compute counts from actual data for events table
-      toolDefinitionsCount: o.toolDefinitions
-        ? Object.keys(o.toolDefinitions).length
+      toolDefinitionsCount: observation.toolDefinitions
+        ? Object.keys(observation.toolDefinitions).length
         : null,
-      toolCallsCount: o.toolCalls ? o.toolCalls.length : null,
+      toolCallsCount: observation.toolCalls
+        ? observation.toolCalls.length
+        : null,
     };
   });
 }
@@ -306,8 +341,16 @@ export const getObservationsForTraceFromEventsTable = async (params: {
   projectId: string;
   traceId: string;
   timestamp?: Date;
+  selectIOAndMetadata?: boolean;
+  selectToolData?: boolean;
 }): Promise<{ observations: FullEventsObservations; totalCount: number }> => {
-  const { projectId, traceId, timestamp } = params;
+  const {
+    projectId,
+    traceId,
+    timestamp,
+    selectIOAndMetadata = false,
+    selectToolData = false,
+  } = params;
 
   const filter: FilterState = [
     {
@@ -337,7 +380,8 @@ export const getObservationsForTraceFromEventsTable = async (params: {
         limit: MAX_OBSERVATIONS_PER_TRACE + 1,
         offset: 0,
         select: "rows",
-        selectToolData: false,
+        selectIOAndMetadata,
+        selectToolData,
         tags: { kind: "byTraceId" },
       },
     );
@@ -446,13 +490,6 @@ async function getObservationsFromEventsTableInternal<T>(
       column === "trace scores (categorical)"
     );
   });
-  const search = clickhouseSearchCondition(
-    opts.searchQuery,
-    opts.searchType,
-    "e",
-    ["span_id", "name", "trace_name", "user_id", "session_id", "trace_id"],
-  );
-
   const orderByEntries = orderByToEntries(
     [orderBy ?? null],
     eventsTableUiColumnDefinitions,
@@ -477,6 +514,21 @@ async function getObservationsFromEventsTableInternal<T>(
         .selectFieldSet("metadata");
     }
   }
+
+  const search = clickhouseSearchCondition({
+    query: opts.searchQuery,
+    searchType: opts.searchType,
+    tablePrefix: "e",
+    searchColumns: [
+      "span_id",
+      "name",
+      "trace_name",
+      "user_id",
+      "session_id",
+      "trace_id",
+    ],
+    useEventsTablePath: true,
+  });
 
   // Handle positionInTrace via CTE with ROW_NUMBER()
   // All modes use the same pattern: rank observations per trace, pick rn = N.
@@ -507,6 +559,7 @@ async function getObservationsFromEventsTableInternal<T>(
         "e.span_id",
         `ROW_NUMBER() OVER (PARTITION BY e.trace_id ORDER BY e.start_time ${direction}, e.event_ts ${direction}, e.span_id ${direction}) as _rn`,
       )
+      .when(search.requiresEventsFull, (b) => b.forceFullTable())
       .where(appliedNativeFilter)
       .where(search);
 
@@ -547,6 +600,7 @@ async function getObservationsFromEventsTableInternal<T>(
         "ON ts.trace_id = e.trace_id AND ts.project_id = e.project_id",
       ),
     )
+    .when(search.requiresEventsFull, (b) => b.forceFullTable())
     .applyFilters(observationsFilter)
     .where(search)
     .when(orderByEntries.length > 0, (b) => b.orderByColumns(orderByEntries))
@@ -609,9 +663,19 @@ export const getObservationByIdFromEventsTable = async ({
     renderingProps,
     preferredClickhouseService: preferredClickhouseService ?? "EventsReadOnly",
   });
-  const mapped = records.map((record) =>
-    convertObservation(record, renderingProps),
-  );
+  const mapped = records.map((record) => {
+    // Remove raw tags field as this is re-mapped to traceTags
+    const { tags, ...converted } = convertEventsObservation(
+      record,
+      renderingProps,
+      true,
+    );
+
+    return {
+      ...converted,
+      traceTags: tags ?? [],
+    };
+  });
 
   mapped.forEach((observation) => {
     recordDistribution(
@@ -682,7 +746,7 @@ async function getObservationByIdFromEventsTableInternal({
 
   const { query, params } = queryBuilder.buildWithParams();
 
-  return await queryClickhouse<ObservationRecordReadType>({
+  return await queryClickhouse<EventsObservationRecordReadType>({
     query,
     params,
     tags: {
@@ -795,7 +859,8 @@ export const getTraceByIdFromEventsTable = async ({
         query,
         params: input.params,
         tags: input.tags,
-        preferredClickhouseService,
+        preferredClickhouseService:
+          preferredClickhouseService ?? "EventsReadOnly",
       });
     },
   });
@@ -816,26 +881,6 @@ export const getTraceByIdFromEventsTable = async ({
 
   return res.shift();
 };
-
-/**
- * Field groups for selective field fetching in v2 observations API
- *
- * - core: Always included (cursor-required fields)
- * - basic, time, io, metadata, model, usage, prompt, metrics: Optional groups
- */
-export const OBSERVATION_FIELD_GROUPS = [
-  "core", // Always included: id, traceId, startTime, endTime, projectId, parentObservationId, type
-  "basic", // name, level, statusMessage, version, environment, bookmarked, public, userId, sessionId
-  "time", // completionStartTime, createdAt, updatedAt
-  "io", // input, output
-  "metadata", // metadata
-  "model", // providedModelName, internalModelId, modelParameters
-  "usage", // usageDetails, costDetails, totalCost
-  "prompt", // promptId, promptName, promptVersion
-  "metrics", // latency, timeToFirstToken
-] as const;
-
-export type ObservationFieldGroup = (typeof OBSERVATION_FIELD_GROUPS)[number];
 
 type PublicApiObservationsQuery = {
   projectId: string;
@@ -858,7 +903,7 @@ type PublicApiObservationsQuery = {
     lastTraceId: string;
     lastId: string;
   };
-  fields?: ObservationFieldGroup[] | null;
+  fields?: ObservationFieldGroupPublicApi[] | null;
   /**
    * Metadata keys to expand (return full non-truncated values).
    * - null/undefined: use truncated metadata (default behavior)
@@ -899,6 +944,13 @@ function buildObservationsQueryComponents(
   const hasTraceFilter = observationsFilter.some(
     (f) => f.clickhouseTable === "traces",
   );
+  const filtersNeedFullTable = observationsFilter.some(
+    (f) =>
+      f.clickhouseTable.startsWith("events") &&
+      (f.field === "e.input" ||
+        f.field === "e.output" ||
+        f.field === "metadata"),
+  );
 
   // Extract time filter and apply filters
   const startTimeFrom = extractTimeFilter(observationsFilter);
@@ -921,6 +973,7 @@ function buildObservationsQueryComponents(
 
   // Build query with joins and filters (no CTEs)
   const queryBuilder = new EventsQueryBuilder({ projectId })
+    .when(filtersNeedFullTable, (b) => b.forceFullTable())
     .when(hasTraceFilter, (b) =>
       b.leftJoin(
         "traces t",
@@ -1072,7 +1125,7 @@ async function getObservationsCountFromEventsTableForPublicApiInternal(
  */
 export const getObservationsFromEventsTableForPublicApi = async (
   opts: Omit<PublicApiObservationsQuery, "fields">,
-): Promise<Array<Observation & ObservationPriceFields>> => {
+): Promise<Array<EventsObservation & ObservationPriceFields>> => {
   const { projectId } = opts;
 
   // Build query with filters and common CTEs
@@ -1081,7 +1134,7 @@ export const getObservationsFromEventsTableForPublicApi = async (
     applyOrderByForObservationsQuery(buildObservationsQueryBase(opts)),
   );
 
-  OBSERVATION_FIELD_GROUPS.forEach((fieldGroup) => {
+  OBSERVATION_FIELD_GROUPS_PUBLIC_API.forEach((fieldGroup) => {
     queryBuilder.selectFieldSet(fieldGroup);
   });
 
@@ -1090,12 +1143,15 @@ export const getObservationsFromEventsTableForPublicApi = async (
       projectId,
       queryBuilder,
     );
-  return await enrichObservationsWithModelData(
+
+  const observations = await enrichObservationsWithModelData(
     observationRecords,
     opts.projectId,
     opts.parseIoAsJson ?? true, // V1 API: default to parsing JSON (backwards compatibility)
     null, // V1 API: no field groups, return complete observations
   );
+
+  return observations;
 };
 
 /**
@@ -1109,7 +1165,9 @@ export const getObservationsFromEventsTableForPublicApi = async (
  * This avoids expensive full-table scans on events_full.
  */
 export const getObservationsV2FromEventsTableForPublicApi = async (
-  opts: PublicApiObservationsQuery & { fields: ObservationFieldGroup[] },
+  opts: PublicApiObservationsQuery & {
+    fields: ObservationFieldGroupPublicApi[];
+  },
 ): Promise<Array<EventsObservationPublic>> => {
   const { projectId, expandMetadataKeys } = opts;
 
@@ -1488,9 +1546,17 @@ export const updateEvents = async (
  * Get grouped provided model names from events table
  * Used for filter options
  */
+type GroupedEventsFilterOptions = {
+  extraWhereRaw?: string;
+  limit?: number;
+  offset?: number;
+  orderBy?: string;
+};
+
 export const getEventsGroupedByModel = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1511,8 +1577,10 @@ export const getEventsGroupedByModel = async (
     .whereRaw(
       "e.provided_model_name IS NOT NULL AND length(e.provided_model_name) > 0",
     )
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(
+      opts?.orderBy ?? "ORDER BY count() DESC, e.provided_model_name ASC",
+    )
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -1537,6 +1605,7 @@ export const getEventsGroupedByModel = async (
 export const getEventsGroupedByModelId = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1555,8 +1624,8 @@ export const getEventsGroupedByModelId = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.model_id IS NOT NULL AND length(e.model_id) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.model_id ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -1581,6 +1650,7 @@ export const getEventsGroupedByModelId = async (
 export const getEventsGroupedByName = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1599,8 +1669,8 @@ export const getEventsGroupedByName = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.name IS NOT NULL AND length(e.name) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.name ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -1625,7 +1695,7 @@ export const getEventsGroupedByName = async (
 export const getEventsGroupedByTraceName = async (
   projectId: string,
   filter: FilterState,
-  opts?: { extraWhereRaw?: string },
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1644,8 +1714,8 @@ export const getEventsGroupedByTraceName = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.trace_name IS NOT NULL AND length(e.trace_name) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.trace_name ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   if (opts?.extraWhereRaw) queryBuilder.whereRaw(opts.extraWhereRaw);
 
@@ -1679,7 +1749,8 @@ export const getEventsGroupedByTraceName = async (
 export const getEventsGroupedByTraceTags = async (
   projectId: string,
   filter: FilterState,
-  opts?: { extraWhereRaw?: string },
+  // We do not support counts for tags so changing the orderBy does not make sense. Therefore, we omit orderBy from options.
+  opts?: Pick<GroupedEventsFilterOptions, "extraWhereRaw" | "limit" | "offset">,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1711,7 +1782,7 @@ export const getEventsGroupedByTraceTags = async (
     .from("filtered_events", "fe")
     .select("DISTINCT arrayJoin(fe.tags) AS tag")
     .orderBy("ORDER BY tag ASC")
-    .limit(1000, 0);
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = tagsQueryBuilder.buildWithParams();
 
@@ -1742,6 +1813,7 @@ export const getEventsGroupedByTraceTags = async (
 export const getEventsGroupedByPromptName = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1761,8 +1833,8 @@ export const getEventsGroupedByPromptName = async (
     .whereRaw("e.type = 'GENERATION'")
     .whereRaw("e.prompt_name IS NOT NULL AND e.prompt_name != ''")
     .where(appliedEventsFilter)
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.prompt_name ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -1788,6 +1860,7 @@ export const getEventsGroupedByPromptName = async (
 export const getEventsGroupedByType = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1806,8 +1879,8 @@ export const getEventsGroupedByType = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.type IS NOT NULL AND length(e.type) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.type ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -1832,7 +1905,7 @@ export const getEventsGroupedByType = async (
 export const getEventsGroupedByUserId = async (
   projectId: string,
   filter: FilterState,
-  opts?: { extraWhereRaw?: string },
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1853,8 +1926,8 @@ export const getEventsGroupedByUserId = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.user_id IS NOT NULL AND length(e.user_id) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.user_id ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   if (opts?.extraWhereRaw) queryBuilder.whereRaw(opts.extraWhereRaw);
 
@@ -1881,6 +1954,7 @@ export const getEventsGroupedByUserId = async (
 export const getEventsGroupedByVersion = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1901,8 +1975,8 @@ export const getEventsGroupedByVersion = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.version IS NOT NULL AND length(e.version) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.version ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -1927,6 +2001,7 @@ export const getEventsGroupedByVersion = async (
 export const getEventsGroupedBySessionId = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1947,8 +2022,8 @@ export const getEventsGroupedBySessionId = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.session_id IS NOT NULL AND length(e.session_id) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.session_id ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -1973,6 +2048,7 @@ export const getEventsGroupedBySessionId = async (
 export const getEventsGroupedByLevel = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -1993,8 +2069,8 @@ export const getEventsGroupedByLevel = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.level IS NOT NULL AND length(e.level) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.level ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -2019,6 +2095,7 @@ export const getEventsGroupedByLevel = async (
 export const getEventsGroupedByEnvironment = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -2039,8 +2116,8 @@ export const getEventsGroupedByEnvironment = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.environment IS NOT NULL AND length(e.environment) > 0")
-    .orderBy("ORDER BY count() DESC")
-    .limit(1000, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY count() DESC, e.environment ASC")
+    .limit(opts?.limit ?? 1000, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -2086,7 +2163,7 @@ export const getEventsGroupedByExperimentDatasetId = async (
     .whereRaw(
       "e.experiment_dataset_id IS NOT NULL AND length(e.experiment_dataset_id) > 0",
     )
-    .orderBy("ORDER BY count() DESC")
+    .orderBy("ORDER BY count() DESC, e.experiment_dataset_id ASC")
     .limit(1000, 0);
 
   const { query, params } = queryBuilder.buildWithParams();
@@ -2133,7 +2210,7 @@ export const getEventsGroupedByExperimentId = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.experiment_id IS NOT NULL AND length(e.experiment_id) > 0")
-    .orderBy("ORDER BY count() DESC")
+    .orderBy("ORDER BY count() DESC, e.experiment_id ASC")
     .limit(1000, 0);
 
   const { query, params } = queryBuilder.buildWithParams();
@@ -2177,7 +2254,7 @@ export const getEventsGroupedByExperimentName = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("e.experiment_name IS NOT NULL AND length(e.experiment_name) > 0")
-    .orderBy("ORDER BY count() DESC")
+    .orderBy("ORDER BY count() DESC, e.experiment_name ASC")
     .limit(1000, 0);
 
   const { query, params } = queryBuilder.buildWithParams();
@@ -2203,6 +2280,7 @@ export const getEventsGroupedByExperimentName = async (
 export const getEventsGroupedByHasParentObservation = async (
   projectId: string,
   filter: FilterState,
+  opts?: GroupedEventsFilterOptions,
 ) => {
   const eventsFilter = new FilterList(
     createFilterFromFilterState(
@@ -2221,8 +2299,8 @@ export const getEventsGroupedByHasParentObservation = async (
       "(e.parent_span_id != '') as hasParentObservation, count() as count",
   })
     .where(appliedEventsFilter)
-    .orderBy("ORDER BY hasParentObservation ASC")
-    .limit(2, 0);
+    .orderBy(opts?.orderBy ?? "ORDER BY hasParentObservation ASC")
+    .limit(opts?.limit ?? 2, opts?.offset ?? 0);
 
   const { query, params } = queryBuilder.buildWithParams();
 
@@ -2265,7 +2343,7 @@ export const getEventsGroupedByToolName = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("length(mapKeys(e.tool_definitions)) > 0")
-    .orderBy("ORDER BY count() DESC")
+    .orderBy("ORDER BY count() DESC, toolName ASC")
     .limit(1000, 0);
 
   const { query, params } = queryBuilder.buildWithParams();
@@ -2310,7 +2388,7 @@ export const getEventsGroupedByCalledToolName = async (
   })
     .where(appliedEventsFilter)
     .whereRaw("length(e.tool_call_names) > 0")
-    .orderBy("ORDER BY count() DESC")
+    .orderBy("ORDER BY count() DESC, calledToolName ASC")
     .limit(1000, 0);
 
   const { query, params } = queryBuilder.buildWithParams();
@@ -2504,6 +2582,7 @@ export async function getAgentGraphDataFromEventsTable(params: {
         query,
         params: input.params,
         tags: input.tags,
+        preferredClickhouseService: "EventsReadOnly",
       });
     },
   });
@@ -2584,9 +2663,7 @@ export const getObservationsBatchIOFromEventsTable = async (opts: {
   minStartTime: Date;
   maxStartTime: Date;
   truncated?: boolean; // Default true for performance, false for full data
-}): Promise<
-  Array<Pick<Observation, "id" | "input" | "output" | "metadata">>
-> => {
+}): Promise<Array<EventBatchIOStringOutput>> => {
   if (opts.observations.length === 0) {
     return [];
   }
@@ -2649,16 +2726,55 @@ export const getObservationsBatchIOFromEventsTable = async (opts: {
 
   return results.map((r) => ({
     id: r.id,
-    input:
-      r.input !== undefined
-        ? applyInputOutputRendering(r.input, DEFAULT_RENDERING_PROPS)
-        : null,
-    output:
-      r.output !== undefined
-        ? applyInputOutputRendering(r.output, DEFAULT_RENDERING_PROPS)
-        : null,
+    input: applyBatchIOStringRendering(r.input),
+    output: applyBatchIOStringRendering(r.output),
     metadata:
       r.metadata !== undefined ? parseMetadataCHRecordToDomain(r.metadata) : {},
+  }));
+};
+
+/**
+ * Discouraged: Avoid using this function for new code.
+ *
+ * This function exists solely to support the annotation queue items lookup,
+ * which needs to resolve parent trace IDs for observation-type queue items.
+ * It is problematic for performance as it lacks time filtering, requiring
+ * ClickHouse to scan a broad range of data.
+ * We aim to refactor the annotation queue data model to eliminate this
+ * dependency in a future iteration.
+ */
+export const getObservationsTraceIdsFromEventsTable = async (opts: {
+  projectId: string;
+  observationIds: string[];
+}) => {
+  const { projectId, observationIds } = opts;
+
+  const queryBuilder = new EventsQueryBuilder({ projectId })
+    .selectRaw("e.trace_id AS trace_id", "e.span_id AS span_id")
+    .whereRaw("e.span_id IN {observationIds: Array(String)}", {
+      observationIds,
+    });
+
+  const { query, params: queryParams } = queryBuilder.buildWithParams();
+
+  const result = await queryClickhouse<{
+    trace_id: string;
+    span_id: string;
+  }>({
+    query,
+    params: queryParams,
+    tags: {
+      feature: "tracing",
+      type: "events",
+      kind: "getObservationsTraceIdsFromEventsTable",
+      projectId,
+    },
+    preferredClickhouseService: "EventsReadOnly",
+  });
+
+  return result.map((row) => ({
+    id: row.span_id,
+    traceId: row.trace_id,
   }));
 };
 
@@ -2720,6 +2836,7 @@ export const getUsersFromEventsTable = async (
       kind: "analytic",
       projectId,
     },
+    preferredClickhouseService: "EventsReadOnly",
   });
 };
 
@@ -2764,6 +2881,7 @@ export const getUsersCountFromEventsTable = async (
       kind: "analytic",
       projectId,
     },
+    preferredClickhouseService: "EventsReadOnly",
   });
 };
 
@@ -2846,6 +2964,7 @@ export const getUserMetricsFromEventsTable = async (
       kind: "analytic",
       projectId,
     },
+    preferredClickhouseService: "EventsReadOnly",
   });
 
   return rows.map((row) => ({
@@ -2902,11 +3021,26 @@ export const getEventsForBlobStorageExport = function (
   projectId: string,
   minTimestamp: Date,
   maxTimestamp: Date,
+  fieldGroups: ObservationFieldGroupFull[] = [...OBSERVATION_FIELD_GROUPS_FULL],
 ) {
-  const queryBuilder = new EventsQueryBuilder({ projectId })
-    .selectFieldSet("export")
-    .selectIO(false) // Full I/O, no truncation
-    .selectFieldSet("metadata")
+  const queryBuilder = new EventsQueryBuilder({ projectId });
+
+  // core is always required (provides id, trace_id, start/end_time used for cursor and deduplication)
+  const effectiveGroups = fieldGroups.includes("core")
+    ? fieldGroups
+    : (["core", ...fieldGroups] as ObservationFieldGroupFull[]);
+
+  for (const group of effectiveGroups) {
+    if (group === "io") {
+      queryBuilder.selectIO(false); // Full I/O, no truncation
+    } else if (group === "model") {
+      queryBuilder.selectFieldSet("model_export"); // "model_export" is the SQL field set name for the "model" group
+    } else {
+      queryBuilder.selectFieldSet(group);
+    }
+  }
+
+  queryBuilder
     .whereRaw(
       "e.start_time >= {minTimestamp: DateTime64(3)} AND e.start_time <= {maxTimestamp: DateTime64(3)}",
       {
@@ -2931,6 +3065,7 @@ export const getEventsForBlobStorageExport = function (
     clickhouseConfigs: {
       request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
     },
+    preferredClickhouseService: "EventsReadOnly",
   });
 };
 
@@ -2960,7 +3095,7 @@ export const getEventsForAnalyticsIntegrations = async function* (
       "mapFromArrays(arrayReverse(e.metadata_names), arrayReverse(e.metadata_values))['$mixpanel_session_id'] as mixpanel_session_id",
     )
     .whereRaw(
-      "e.start_time >= {minTimestamp: DateTime64(3)} AND e.start_time <= {maxTimestamp: DateTime64(3)}",
+      "e.start_time >= {minTimestamp: DateTime64(3)} AND e.start_time < {maxTimestamp: DateTime64(3)}",
       {
         minTimestamp: convertDateToClickhouseDateTime(minTimestamp),
         maxTimestamp: convertDateToClickhouseDateTime(maxTimestamp),
@@ -2983,6 +3118,7 @@ export const getEventsForAnalyticsIntegrations = async function* (
     clickhouseConfigs: {
       request_timeout: env.LANGFUSE_CLICKHOUSE_DATA_EXPORT_REQUEST_TIMEOUT_MS,
     },
+    preferredClickhouseService: "EventsReadOnly",
   });
 
   const baseUrl = env.NEXTAUTH_URL?.replace("/api/auth", "");
@@ -3097,6 +3233,7 @@ export const getTraceMetadataByIdsFromEvents = async (props: {
         query,
         params: input.params,
         tags: input.tags,
+        preferredClickhouseService: "EventsReadOnly",
       }),
   });
 };
@@ -3142,6 +3279,7 @@ export const getAvgCostByEvaluatorIds = async (
       kind: "analytic",
       projectId,
     },
+    preferredClickhouseService: "EventsReadOnly",
   });
 
   return rows.map((row) => ({
@@ -3184,6 +3322,7 @@ export const getSessionMetricsFromEvents = async (props: {
         query,
         params: input.params,
         tags: input.tags,
+        preferredClickhouseService: "EventsReadOnly",
       }),
   });
 
@@ -3193,3 +3332,138 @@ export const getSessionMetricsFromEvents = async (props: {
     total_observations: Number(row.total_observations),
   }));
 };
+
+/**
+ * SDK metadata detection result.
+ * isOtel is always present, other fields are optional (only when non-empty).
+ */
+export type SdkMetadata = {
+  isOtel: boolean;
+  name?: string;
+  version?: string;
+  language?: string;
+};
+
+/**
+ * Extract SDK info from v3 metadata object.
+ * - Old (nested): `scope: {name, version}`, `resourceAttributes: {"telemetry.sdk.language": ...}`
+ */
+function extractSdkInfoFromMetadata(metadata: Record<string, string>): {
+  name?: string;
+  version?: string;
+  language?: string;
+  telemetrySdkName?: string;
+} {
+  try {
+    const scopeJson = metadata["scope"];
+    const resourceJson = metadata["resourceAttributes"];
+
+    const scope = scopeJson ? JSON.parse(scopeJson) : null;
+    const resource = resourceJson ? JSON.parse(resourceJson) : null;
+
+    const name = scope?.name;
+    const version = scope?.version;
+    const language = resource?.["telemetry.sdk.language"];
+    const telemetrySdkName = resource?.["telemetry.sdk.name"];
+
+    return {
+      ...(name && { name }),
+      ...(version && { version }),
+      ...(language && { language }),
+      ...(telemetrySdkName && { telemetrySdkName }),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Infers SDK details from the most recent event in the past 7 days containing Langfuse SDK metadata attributes.
+ *
+ * Detection priority:
+ * - v4+: Direct columns (scope_name, scope_version, telemetry_sdk_language)
+ * - v3: Nested JSON in metadata (`scope: {name, version}`)
+ * - v2 and older: No SDK metadata → returns isOtel: false
+ *
+ * Returns the most recent matching event's SDK info. Projects with no events
+ * in the past 7 days return isOtel: false (acceptable for inactive projects).
+ */
+export async function getLatestSdkVersionInfoFromEvents(params: {
+  projectId: string;
+}): Promise<SdkMetadata> {
+  const { projectId } = params;
+
+  // Time filter: last 7 days
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const filter = new FilterList([
+    new DateTimeFilter({
+      clickhouseTable: "events_proto",
+      field: "start_time",
+      operator: ">=",
+      value: sevenDaysAgo,
+      tablePrefix: "e",
+    }),
+  ]);
+
+  const builder = new EventsQueryBuilder({ projectId })
+    .selectRaw(
+      "e.scope_name AS scope_name",
+      "e.scope_version AS scope_version",
+      "e.telemetry_sdk_language AS telemetry_sdk_language",
+    )
+    .selectMetadataExpanded([]) // Full metadata values from events_full
+    .applyFilters(filter)
+    // OR condition: v4 has scope_name column, v3 has scope in metadata
+    .where({
+      query: "e.scope_name != '' OR hasAny(e.metadata_names, ['scope'])",
+      params: {},
+    })
+    .orderByDefault()
+    .limit(1);
+
+  const { query, params: queryParams } = builder.buildWithParams();
+
+  const result = await queryClickhouse<{
+    scope_name: string;
+    scope_version: string;
+    telemetry_sdk_language: string;
+    metadata: Record<string, string>;
+  }>({
+    query,
+    params: queryParams,
+    tags: {
+      feature: "sdk-metadata-detection",
+      kind: "sdkMetadata",
+      projectId,
+    },
+    preferredClickhouseService: "EventsReadOnly",
+  });
+
+  if (result.length === 0) {
+    return { isOtel: false };
+  }
+  const row = result[0];
+
+  // Prefer direct columns (v4), fall back to metadata (v3)
+  if (row.scope_name) {
+    return {
+      isOtel: true,
+      ...(row.scope_name && { name: row.scope_name }),
+      ...(row.scope_version && { version: row.scope_version }),
+      ...(row.telemetry_sdk_language && {
+        language: row.telemetry_sdk_language,
+      }),
+    };
+  }
+
+  // Fall back to metadata extraction for v3 and raw OTel (e.g., Vercel AI SDK)
+  const { telemetrySdkName, ...sdkInfo } = extractSdkInfoFromMetadata(
+    row.metadata ?? {},
+  );
+  return {
+    isOtel:
+      telemetrySdkName === "opentelemetry" ||
+      Boolean(sdkInfo.name || sdkInfo.version || sdkInfo.language),
+    ...sdkInfo,
+  };
+}

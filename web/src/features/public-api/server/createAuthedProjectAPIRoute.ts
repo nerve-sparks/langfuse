@@ -15,11 +15,19 @@ import { RateLimitService } from "@/src/features/public-api/server/RateLimitServ
 import { contextWithLangfuseProps } from "@langfuse/shared/src/server";
 import * as opentelemetry from "@opentelemetry/api";
 import { env } from "@/src/env.mjs";
+import { isZodError } from "@/src/features/public-api/server/withMiddlewares";
+import {
+  createUnstablePublicApiAuthError,
+  createUnstablePublicApiRequestValidationError,
+  sendUnstablePublicApiErrorResponse,
+  unstablePublicEvalsErrorContract,
+  type PublicApiErrorContract,
+} from "@/src/features/public-api/server/unstable-public-api-error-contract";
 
 /** Access levels that can be accepted by project-scoped API routes. */
 type RouteAccessLevel = Exclude<ApiAccessLevel, "organization">;
 
-type RouteConfig<
+export type AuthedProjectAPIRouteConfig<
   TQuery extends ZodType<any>,
   TBody extends ZodType<any>,
   TResponse extends ZodType<any>,
@@ -44,12 +52,18 @@ type RouteConfig<
    * @default false
    */
   isAdminApiKeyAuthAllowed?: boolean;
+  errorContract?: PublicApiErrorContract;
   /**
    * Access levels accepted for this route. Defaults to ["project"] (Basic auth only).
    * Set to ["project", "scores"] to also allow Bearer auth with a public key
    * (which receives accessLevel "scores").
    */
   allowedAccessLevels?: RouteAccessLevel[];
+  /**
+   * Whether in-app agent API keys can call this route without additional confirmation. Defaults to false.
+   * Only set this to true on non-mutating (GET) routes that should be callable by the in-app agent.
+   */
+  allowInAppAgentKey?: boolean;
   fn: (params: {
     query: z.infer<TQuery>;
     body: z.infer<TBody>;
@@ -76,6 +90,7 @@ type RouteConfig<
 async function verifyApiKeyAuth(
   authHeader: string | undefined,
   allowedAccessLevels: RouteAccessLevel[] = ["project"],
+  allowInAppAgentKey = false,
 ): Promise<
   AuthHeaderValidVerificationResult & {
     scope: { projectId: string; accessLevel: RouteAccessLevel };
@@ -84,7 +99,7 @@ async function verifyApiKeyAuth(
   const regularAuth = await new ApiAuthService(
     prisma,
     redis,
-  ).verifyAuthHeaderAndReturnScope(authHeader);
+  ).verifyAuthHeaderAndReturnScope(authHeader, { allowInAppAgentKey });
 
   if (!regularAuth.validKey) {
     throw { status: 401, message: regularAuth.error };
@@ -96,14 +111,14 @@ async function verifyApiKeyAuth(
     )
   ) {
     throw {
-      status: 401,
+      status: 403,
       message: "Access denied - insufficient permissions for this endpoint",
     };
   }
 
   if (!regularAuth.scope.projectId) {
     throw {
-      status: 401,
+      status: 403,
       message:
         "Project ID not found for API token. Are you using an organization key?",
     };
@@ -163,7 +178,9 @@ async function verifyAdminApiKeyAuth(req: NextApiRequest): Promise<
   // Extract Bearer token
   const bearerToken = authHeader.replace("Bearer ", "");
 
-  // Verify both the Bearer token and header match the ADMIN_API_KEY
+  // Verify both the Bearer token and header match the ADMIN_API_KEY.
+  // Keep this comparison in sync with the admin-key check in
+  // web/src/ee/features/admin-api/server/adminApiAuth.ts.
   try {
     // timingSafeEqual throws on different input lengths, handle accordingly
     const bearerTokenEqual = crypto.timingSafeEqual(
@@ -212,6 +229,7 @@ async function verifyAdminApiKeyAuth(req: NextApiRequest): Promise<
       apiKeyId: "ADMIN_API_KEY", // Special identifier for audit logging
       publicKey: "ADMIN_API_KEY",
       isIngestionSuspended: false,
+      isInAppAgentKey: false,
     },
   };
 }
@@ -233,6 +251,7 @@ export async function verifyAuth(
   req: NextApiRequest,
   isAdminApiKeyAuthAllowed: boolean,
   allowedAccessLevels: RouteAccessLevel[] = ["project"],
+  allowInAppAgentKey = false,
 ): Promise<
   AuthHeaderValidVerificationResult & {
     scope: { projectId: string; accessLevel: RouteAccessLevel };
@@ -249,11 +268,16 @@ export async function verifyAuth(
     return await verifyApiKeyAuth(
       req.headers.authorization,
       allowedAccessLevels,
+      allowInAppAgentKey,
     );
   }
 
   // Only regular API key auth is allowed
-  return await verifyApiKeyAuth(req.headers.authorization, allowedAccessLevels);
+  return await verifyApiKeyAuth(
+    req.headers.authorization,
+    allowedAccessLevels,
+    allowInAppAgentKey,
+  );
 }
 
 export const createAuthedProjectAPIRoute = <
@@ -261,7 +285,7 @@ export const createAuthedProjectAPIRoute = <
   TBody extends ZodType<any>,
   TResponse extends ZodType<any>,
 >(
-  routeConfig: RouteConfig<TQuery, TBody, TResponse>,
+  routeConfig: AuthedProjectAPIRouteConfig<TQuery, TBody, TResponse>,
 ): ((req: NextApiRequest, res: NextApiResponse) => Promise<void>) => {
   return async (req: NextApiRequest, res: NextApiResponse) => {
     let auth: AuthHeaderValidVerificationResult & {
@@ -274,10 +298,18 @@ export const createAuthedProjectAPIRoute = <
         req,
         routeConfig.isAdminApiKeyAuthAllowed || false,
         routeConfig.allowedAccessLevels || ["project"],
+        routeConfig.allowInAppAgentKey === true,
       );
     } catch (error: any) {
       const statusCode = error.status || 401;
       const message = error.message || "Authentication failed";
+
+      if (routeConfig.errorContract === unstablePublicEvalsErrorContract) {
+        return sendUnstablePublicApiErrorResponse(
+          res,
+          createUnstablePublicApiAuthError({ statusCode, message }),
+        );
+      }
 
       res.status(statusCode).json({ message });
 
@@ -291,7 +323,10 @@ export const createAuthedProjectAPIRoute = <
       );
 
     if (rateLimitResponse?.isRateLimited()) {
-      return rateLimitResponse.sendRestResponseIfLimited(res);
+      return rateLimitResponse.sendRestResponseIfLimited(
+        res,
+        routeConfig.errorContract,
+      );
     }
 
     logger.debug(
@@ -302,16 +337,54 @@ export const createAuthedProjectAPIRoute = <
       },
     );
 
-    const query = routeConfig.querySchema
-      ? routeConfig.querySchema.parse(req.query)
-      : ({} as z.infer<TQuery>);
-    const body = routeConfig.bodySchema
-      ? routeConfig.bodySchema.parse(req.body)
-      : ({} as z.infer<TBody>);
+    let query: z.infer<TQuery>;
+    try {
+      query = routeConfig.querySchema
+        ? routeConfig.querySchema.parse(req.query)
+        : ({} as z.infer<TQuery>);
+    } catch (error) {
+      if (
+        routeConfig.errorContract === unstablePublicEvalsErrorContract &&
+        isZodError(error)
+      ) {
+        return sendUnstablePublicApiErrorResponse(
+          res,
+          createUnstablePublicApiRequestValidationError({
+            error,
+            requestPart: "query",
+          }),
+        );
+      }
+
+      throw error;
+    }
+
+    let body: z.infer<TBody>;
+    try {
+      body = routeConfig.bodySchema
+        ? routeConfig.bodySchema.parse(req.body)
+        : ({} as z.infer<TBody>);
+    } catch (error) {
+      if (
+        routeConfig.errorContract === unstablePublicEvalsErrorContract &&
+        isZodError(error)
+      ) {
+        return sendUnstablePublicApiErrorResponse(
+          res,
+          createUnstablePublicApiRequestValidationError({
+            error,
+            requestPart: "body",
+          }),
+        );
+      }
+
+      throw error;
+    }
 
     const ctx = contextWithLangfuseProps({
       headers: req.headers,
       projectId: auth.scope.projectId,
+      apiKeyId: auth.scope.apiKeyId,
     });
     return opentelemetry.context.with(ctx, async () => {
       const response = await routeConfig.fn({

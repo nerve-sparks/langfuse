@@ -18,9 +18,8 @@ import {
   instrumentSync,
   recordDistribution,
   UsageDetails,
-  extractToolsFromObservation,
-  convertDefinitionsToMap,
-  convertCallsToArrays,
+  normalizeToolsForObservation,
+  normalizeToolMetadataForObservation,
 } from "../";
 
 import { LangfuseOtelSpanAttributes } from "./attributes";
@@ -301,6 +300,11 @@ export class OtelIngestionProcessor {
                   ...spanMetadata,
                   ...traceMetadata,
                 };
+                const normalizedTools = normalizeToolsForObservation(
+                  input,
+                  output,
+                  metadata,
+                );
 
                 // Extract instrumentation metadata
                 const serviceName = resourceAttributes?.["service.name"] as
@@ -361,23 +365,18 @@ export class OtelIngestionProcessor {
                   );
                 }
 
-                let toolDefinitions = undefined;
-                let toolCalls = undefined;
-                let toolCallNames = undefined;
-
-                const { toolDefinitions: rawToolDefinitions, toolArguments } =
-                  extractToolsFromObservation(input, output);
-
-                if (rawToolDefinitions.length > 0) {
-                  toolDefinitions = convertDefinitionsToMap(rawToolDefinitions);
-                }
-
-                if (toolArguments.length > 0) {
-                  const { tool_calls, tool_call_names } =
-                    convertCallsToArrays(toolArguments);
-                  toolCalls = tool_calls;
-                  toolCallNames = tool_call_names;
-                }
+                const toolDefinitions =
+                  Object.keys(normalizedTools.toolDefinitions).length > 0
+                    ? normalizedTools.toolDefinitions
+                    : undefined;
+                const toolCalls =
+                  normalizedTools.toolCalls.length > 0
+                    ? normalizedTools.toolCalls
+                    : undefined;
+                const toolCallNames =
+                  normalizedTools.toolCallNames.length > 0
+                    ? normalizedTools.toolCallNames
+                    : undefined;
 
                 events.push({
                   projectId: this.projectId,
@@ -471,11 +470,11 @@ export class OtelIngestionProcessor {
                     resourceAttributes?.[LangfuseOtelSpanAttributes.RELEASE] ??
                     null,
 
-                  input,
-                  output,
+                  input: normalizedTools.input,
+                  output: normalizedTools.output,
 
                   // Metadata
-                  metadata,
+                  metadata: normalizedTools.metadata,
 
                   // Instrumentation metadata
                   source: "otel",
@@ -978,6 +977,18 @@ export class OtelIngestionProcessor {
       source: "ingestion" as const,
     };
 
+    const metadata = {
+      ...resourceAttributeMetadata,
+      ...spanAttributeMetadata,
+      ...(isLangfuseSDKSpans ? {} : { attributes: filteredAttributes }),
+      resourceAttributes,
+      scope: { ...scopeSpan.scope, attributes: scopeAttributes },
+    };
+    const normalizedToolMetadata = normalizeToolMetadataForObservation(
+      input,
+      metadata,
+    );
+
     const observation = {
       id: this.parseId(span.spanId?.data ?? span.spanId),
       traceId,
@@ -990,13 +1001,7 @@ export class OtelIngestionProcessor {
         attributes,
         startTimeISO,
       ),
-      metadata: {
-        ...resourceAttributeMetadata,
-        ...spanAttributeMetadata,
-        ...(isLangfuseSDKSpans ? {} : { attributes: filteredAttributes }),
-        resourceAttributes,
-        scope: { ...scopeSpan.scope, attributes: scopeAttributes },
-      },
+      metadata: normalizedToolMetadata.metadata,
       level:
         attributes[LangfuseOtelSpanAttributes.OBSERVATION_LEVEL] ??
         (span.status?.code === 2
@@ -1034,7 +1039,7 @@ export class OtelIngestionProcessor {
         observationContext,
       ),
       costDetails: this.extractCostDetails(attributes, observationContext),
-      input,
+      input: normalizedToolMetadata.input,
       output,
     };
 
@@ -1315,18 +1320,25 @@ export class OtelIngestionProcessor {
     const keys = Object.keys(input).map((key) => key.replace(`${prefix}.`, ""));
     const useArray = keys.some((key) => key.match(/^\d+\./));
 
+    // Blocklist to prevent prototype pollution via crafted OTel attribute keys
+    const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
     // Helper function to set a value at a nested path
     const setNestedValue = (obj: any, path: string[], value: unknown): void => {
       let current = obj;
       for (let i = 0; i < path.length - 1; i++) {
         const key = path[i];
+        if (DANGEROUS_KEYS.has(key)) return;
         if (!(key in current)) {
           // Check if next key is a number to decide if we need an array or object
           current[key] = /^\d+$/.test(path[i + 1]) ? [] : {};
         }
         current = current[key];
       }
-      current[path[path.length - 1]] = value;
+      const finalKey = path[path.length - 1];
+      if (!DANGEROUS_KEYS.has(finalKey)) {
+        current[finalKey] = value;
+      }
     };
 
     if (useArray) {
@@ -1335,7 +1347,7 @@ export class OtelIngestionProcessor {
         const pathParts = key.split(".");
         const index = parseInt(pathParts[0], 10);
         if (!result[index]) {
-          result[index] = {};
+          result[index] = Object.create(null);
         }
         if (pathParts.length === 2) {
           // Simple case: 0.content -> result[0].content
@@ -1351,7 +1363,7 @@ export class OtelIngestionProcessor {
       }
       return result;
     } else {
-      const result: Record<string, unknown> = {};
+      const result: Record<string, unknown> = Object.create(null);
       for (const key of keys) {
         const pathParts = key.split(".");
         if (pathParts.length === 1) {
@@ -1815,11 +1827,7 @@ export class OtelIngestionProcessor {
       );
     }
     if (input || output) {
-      return {
-        input: this.appendOtelToolDefinitionsToInput(input, attributes),
-        output,
-        filteredAttributes,
-      };
+      return { input, output, filteredAttributes };
     }
 
     // OpenTelemetry tools (https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans)
@@ -1830,77 +1838,6 @@ export class OtelIngestionProcessor {
     }
 
     return { input: null, output: null, filteredAttributes };
-  }
-
-  private appendOtelToolDefinitionsToInput(
-    input: unknown,
-    attributes: Record<string, unknown>,
-  ): unknown {
-    const toolDefinitions = this.extractOtelToolDefinitions(attributes);
-
-    if (!toolDefinitions || input == null) {
-      return input;
-    }
-
-    const mergeToolDefinitions = (value: unknown): unknown => {
-      if (Array.isArray(value)) {
-        return { messages: value, tools: toolDefinitions };
-      }
-
-      if (typeof value !== "object" || value == null) {
-        return null;
-      }
-
-      const inputObject = value as Record<string, unknown>;
-
-      if (inputObject.tools != null) {
-        return inputObject;
-      }
-
-      return {
-        ...inputObject,
-        tools: toolDefinitions,
-      };
-    };
-
-    if (typeof input === "string") {
-      try {
-        const parsedInput = JSON.parse(input);
-        const mergedInput = mergeToolDefinitions(parsedInput);
-        return mergedInput == null ? input : JSON.stringify(mergedInput);
-      } catch {
-        return input;
-      }
-    }
-
-    return mergeToolDefinitions(input) ?? input;
-  }
-
-  private extractOtelToolDefinitions(
-    attributes: Record<string, unknown>,
-  ): unknown[] | null {
-    const parseJsonString = (value: unknown): unknown => {
-      if (typeof value !== "string") {
-        return value;
-      }
-
-      try {
-        return JSON.parse(value);
-      } catch {
-        return value;
-      }
-    };
-
-    const modelRequestParameters = parseJsonString(
-      attributes["model_request_parameters"],
-    ) as Record<string, unknown> | null;
-
-    const toolDefinitions = parseJsonString(
-      attributes["gen_ai.tool.definitions"] ??
-        modelRequestParameters?.function_tools,
-    );
-
-    return Array.isArray(toolDefinitions) ? toolDefinitions : null;
   }
 
   /**
@@ -2021,64 +1958,28 @@ export class OtelIngestionProcessor {
     attributes: Record<string, unknown>,
     domain: "trace" | "observation",
   ): Record<string, unknown> {
-    let topLevelMetadata: Record<string, unknown> = {};
-
     const metadataKeyPrefix =
       domain === "observation"
         ? LangfuseOtelSpanAttributes.OBSERVATION_METADATA
         : LangfuseOtelSpanAttributes.TRACE_METADATA;
 
-    const langfuseMetadataAttribute =
-      attributes[metadataKeyPrefix] || attributes["langfuse.metadata"];
-
-    if (langfuseMetadataAttribute) {
-      try {
-        if (typeof langfuseMetadataAttribute === "string") {
-          topLevelMetadata = JSON.parse(langfuseMetadataAttribute as string);
-        } else if (typeof langfuseMetadataAttribute === "object") {
-          topLevelMetadata = langfuseMetadataAttribute as Record<
-            string,
-            unknown
-          >;
-        }
-      } catch {
-        // Continue with nested metadata extraction
-      }
-    }
-
-    const langfuseMetadata: Record<string, unknown> = {};
-
-    for (const [key, value] of Object.entries(attributes)) {
-      for (const prefix of [
+    const topLevelMetadata = this.parseMetadataAttribute(
+      attributes[metadataKeyPrefix] || attributes["langfuse.metadata"],
+    );
+    const langfuseMetadata = this.extractPrefixedMetadataAttributes({
+      attributes,
+      prefixes: [
         metadataKeyPrefix,
         "langfuse.metadata",
         "ai.telemetry.metadata",
-      ]) {
-        if (
-          key.startsWith(`${prefix}.`) &&
-          // Filter out the Vercel AI SDK trace attribute keys
-          ![
-            "ai.telemetry.metadata.userId",
-            "ai.telemetry.metadata.sessionId",
-            "ai.telemetry.metadata.tags",
-            "ai.telemetry.metadata.langfusePrompt",
-          ].includes(key)
-        ) {
-          const newKey = key.replace(`${prefix}.`, "");
-          langfuseMetadata[newKey] = value;
-        }
-      }
-    }
-
-    // Vercel AI SDK
-    const tools =
-      "ai.prompt.tools" in attributes
-        ? attributes["ai.prompt.tools"]
-        : undefined;
-
-    if (tools) {
-      langfuseMetadata["tools"] = tools;
-    }
+      ],
+      excludedKeys: new Set([
+        "ai.telemetry.metadata.userId",
+        "ai.telemetry.metadata.sessionId",
+        "ai.telemetry.metadata.tags",
+        "ai.telemetry.metadata.langfusePrompt",
+      ]),
+    });
 
     return {
       ...topLevelMetadata,
@@ -2524,12 +2425,14 @@ export class OtelIngestionProcessor {
       rawUsageDetails["cache_read.input_tokens"] ??
       rawUsageDetails["cache_read_tokens"] ??
       rawUsageDetails["details.cache_read_tokens"] ??
-      rawUsageDetails["details.cache_read_input_tokens"];
+      rawUsageDetails["details.cache_read_input_tokens"] ??
+      rawUsageDetails["prompt_details.cache_read"];
     const cacheCreationTokens =
       rawUsageDetails["cache_creation.input_tokens"] ??
       rawUsageDetails["cache_write_tokens"] ??
       rawUsageDetails["details.cache_write_tokens"] ??
-      rawUsageDetails["details.cache_creation_input_tokens"];
+      rawUsageDetails["details.cache_creation_input_tokens"] ??
+      rawUsageDetails["prompt_details.cache_write"];
 
     const normalizedUsageDetails = Object.entries(rawUsageDetails).reduce(
       (acc: Record<string, number>, [key, value]) => {
@@ -2547,10 +2450,12 @@ export class OtelIngestionProcessor {
             "cache_read_tokens",
             "details.cache_read_tokens",
             "details.cache_read_input_tokens",
+            "prompt_details.cache_read",
             "cache_creation.input_tokens",
             "cache_write_tokens",
             "details.cache_write_tokens",
             "details.cache_creation_input_tokens",
+            "prompt_details.cache_write",
           ].includes(key)
         ) {
           return acc;
@@ -2690,6 +2595,68 @@ export class OtelIngestionProcessor {
     return [];
   }
 
+  private parseMetadataAttribute(value: unknown): Record<string, unknown> {
+    if (!value) {
+      return {};
+    }
+
+    if (typeof value === "string") {
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === "object"
+          ? (parsed as Record<string, unknown>)
+          : {};
+      } catch {
+        return {};
+      }
+    }
+
+    if (typeof value === "object") {
+      return value as Record<string, unknown>;
+    }
+
+    return {};
+  }
+
+  private extractPrefixedMetadataAttributes(params: {
+    attributes: Record<string, unknown>;
+    prefixes: string[];
+    excludedKeys?: Set<string>;
+  }): Record<string, unknown> {
+    const { attributes, prefixes, excludedKeys = new Set<string>() } = params;
+    const metadata: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(attributes)) {
+      for (const prefix of prefixes) {
+        if (!key.startsWith(`${prefix}.`) || excludedKeys.has(key)) {
+          continue;
+        }
+
+        const metadataKey = key.slice(prefix.length + 1);
+        if (!metadataKey) {
+          continue;
+        }
+
+        metadata[metadataKey] = value;
+      }
+    }
+
+    return metadata;
+  }
+
+  private extractMetadataFromPrefix(params: {
+    attributes: Record<string, unknown>;
+    prefix: string;
+  }): Record<string, unknown> {
+    const { attributes, prefix } = params;
+    return {
+      ...this.parseMetadataAttribute(attributes[prefix]),
+      ...this.extractPrefixedMetadataAttributes({
+        attributes,
+        prefixes: [prefix],
+      }),
+    };
+  }
+
   /**
    * Extracts experiment-related fields from span attributes.
    * Returns undefined for fields that are not present.
@@ -2727,35 +2694,19 @@ export class OtelIngestionProcessor {
       attributes[LangfuseOtelSpanAttributes.EXPERIMENT_ITEM_VERSION];
 
     // Extract experiment metadata
-    const experimentMetadataStr =
-      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_METADATA];
-    let experimentMetadata: Record<string, unknown> = {};
-    if (experimentMetadataStr && typeof experimentMetadataStr === "string") {
-      try {
-        experimentMetadata = JSON.parse(experimentMetadataStr);
-      } catch {
-        // If parsing fails, treat as empty
-      }
-    }
-    const experimentMetadataFlattened =
-      flattenJsonToPathArrays(experimentMetadata);
+    const experimentMetadataFlattened = flattenJsonToPathArrays(
+      this.extractMetadataFromPrefix({
+        attributes,
+        prefix: LangfuseOtelSpanAttributes.EXPERIMENT_METADATA,
+      }),
+    );
 
     // Extract experiment item metadata
-    const experimentItemMetadataStr =
-      attributes[LangfuseOtelSpanAttributes.EXPERIMENT_ITEM_METADATA];
-    let experimentItemMetadata: Record<string, unknown> = {};
-    if (
-      experimentItemMetadataStr &&
-      typeof experimentItemMetadataStr === "string"
-    ) {
-      try {
-        experimentItemMetadata = JSON.parse(experimentItemMetadataStr);
-      } catch {
-        // If parsing fails, treat as empty
-      }
-    }
     const experimentItemMetadataFlattened = flattenJsonToPathArrays(
-      experimentItemMetadata,
+      this.extractMetadataFromPrefix({
+        attributes,
+        prefix: LangfuseOtelSpanAttributes.EXPERIMENT_ITEM_METADATA,
+      }),
     );
 
     return {
