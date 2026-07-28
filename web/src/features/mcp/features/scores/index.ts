@@ -14,7 +14,6 @@ import {
   handleCreateScoreConfig,
 } from "./tools/createScoreConfig";
 import { createScoreTool, handleCreateScore } from "./tools/createScore";
-import { deleteScoreTool, handleDeleteScore } from "./tools/deleteScore";
 import {
   deleteScoreConfigTool,
   handleDeleteScoreConfig,
@@ -24,7 +23,7 @@ import {
   handleUpdateScoreConfig,
 } from "./tools/updateScoreConfig";
 
-export const scoresFeature: McpFeatureModule = {
+export const scoresFeature = {
   name: "scores",
   description:
     "Read scores and manage score configurations in the current Langfuse project",
@@ -40,10 +39,6 @@ export const scoresFeature: McpFeatureModule = {
     {
       definition: createScoreTool,
       handler: handleCreateScore,
-    },
-    {
-      definition: deleteScoreTool,
-      handler: handleDeleteScore,
     },
     {
       definition: listScoreConfigsTool,
@@ -66,4 +61,4 @@ export const scoresFeature: McpFeatureModule = {
       handler: handleDeleteScoreConfig,
     },
   ],
-};
+} as const satisfies McpFeatureModule;

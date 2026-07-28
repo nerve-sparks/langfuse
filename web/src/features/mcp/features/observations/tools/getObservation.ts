@@ -1,11 +1,11 @@
-import { SpanKind } from "@opentelemetry/api";
 import { LangfuseNotFoundError } from "@langfuse/shared";
 import { z } from "zod";
 import {
   getObservationsV2FromEventsTableForPublicApi,
-  instrumentAsync,
+  buildObservationUrl,
 } from "@langfuse/shared/src/server";
 import { defineTool } from "../../../core/define-tool";
+import { runMcpTool } from "../../../core/run-mcp-tool";
 import {
   ExpandMetadataKeysSchema,
   getMetadataExpansionForProjection,
@@ -33,17 +33,15 @@ export const [getObservationTool, handleGetObservation] = defineTool({
   baseSchema: GetObservationBaseSchema,
   inputSchema: GetObservationBaseSchema,
   handler: async (input, context) => {
-    return await instrumentAsync(
-      { name: "mcp.observations.get", spanKind: SpanKind.INTERNAL },
-      async (span) => {
+    return await runMcpTool({
+      spanName: "mcp.observations.get",
+      context,
+      attributes: { "mcp.observation_id": input.observationId },
+      fn: async (span) => {
         const projectionFields = getProjectionFields(input.fields);
         const fieldGroups = getProjectionFieldGroups(projectionFields);
 
         span.setAttributes({
-          "langfuse.project.id": context.projectId,
-          "langfuse.org.id": context.orgId,
-          "mcp.api_key_id": context.apiKeyId,
-          "mcp.observation_id": input.observationId,
           "mcp.projection_fields": projectionFields.join(","),
           "mcp.field_groups": fieldGroups.join(","),
         });
@@ -76,7 +74,7 @@ export const [getObservationTool, handleGetObservation] = defineTool({
           );
         }
 
-        return projectObservation(
+        const projectedObservation = projectObservation(
           {
             ...observation,
             parentObservationId:
@@ -86,8 +84,21 @@ export const [getObservationTool, handleGetObservation] = defineTool({
           },
           projectionFields,
         );
+
+        return {
+          ...projectedObservation,
+          ...(observation.traceId
+            ? {
+                url: buildObservationUrl({
+                  projectId: context.projectId,
+                  traceId: observation.traceId,
+                  observationId: observation.id,
+                }),
+              }
+            : {}),
+        };
       },
-    );
+    });
   },
   readOnlyHint: true,
 });

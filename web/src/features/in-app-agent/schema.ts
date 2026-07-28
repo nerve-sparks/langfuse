@@ -1,3 +1,9 @@
+// This module should contained ag-ui base schemas OR shared schemas,
+// do not add any one-off schemas here.
+// This module is shared by browser and server in-app-agent code. Keep it
+// runtime-neutral: Zod schemas and TypeScript types only, with no React,
+// browser-only, server-only, database, or Mastra imports.
+
 import type { EventType } from "@ag-ui/core";
 import { z } from "zod";
 
@@ -21,6 +27,38 @@ const AgUiToolCallSchema = z.object({
     arguments: z.string(),
   }),
   encryptedValue: z.string().optional(),
+});
+
+export const InAppAgentMessageFeedbackValueSchema = z.enum([
+  "thumbs_up",
+  "thumbs_down",
+]);
+
+export type InAppAgentMessageFeedbackValue = z.infer<
+  typeof InAppAgentMessageFeedbackValueSchema
+>;
+
+export const InAppAgentMessageFeedbackSchema = z.object({
+  value: InAppAgentMessageFeedbackValueSchema,
+  comment: z.string().nullable(),
+});
+
+export type InAppAgentMessageFeedback = z.infer<
+  typeof InAppAgentMessageFeedbackSchema
+>;
+
+export const InAppAgentRateLimitErrorResponseSchema = z.object({
+  code: z.literal("rate_limited"),
+  details: z.object({
+    retryAfterSeconds: z.number().int().positive(),
+  }),
+});
+
+// Changes to this schema need to be backwards-compatible as messages with this are already persisted.
+export const InAppAgentRedirectActionToolResultSchema = z.object({
+  type: z.literal("redirectAction"),
+  label: z.string().min(1).max(80),
+  href: z.string().min(1),
 });
 
 const AgUiInputContentSourceSchema = z.discriminatedUnion("type", [
@@ -84,6 +122,8 @@ export const AgUiMessageSchema = z.discriminatedUnion("role", [
     role: z.literal("assistant"),
     content: z.string().optional(),
     toolCalls: z.array(AgUiToolCallSchema).optional(),
+    feedback: InAppAgentMessageFeedbackSchema.optional(),
+    runId: z.string().optional(),
   }),
   AgUiBaseMessageSchema.extend({
     role: z.literal("user"),
@@ -113,11 +153,45 @@ export const AgUiMessageSchema = z.discriminatedUnion("role", [
 
 export type AgUiMessage = z.infer<typeof AgUiMessageSchema>;
 
+const AbsoluteHttpUrlSchema = z.string().transform((value, ctx) => {
+  let parsedUrl: URL;
+
+  try {
+    parsedUrl = new URL(value);
+  } catch {
+    ctx.addIssue({
+      code: "custom",
+      message: "URL must be absolute",
+    });
+    return z.NEVER;
+  }
+
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    ctx.addIssue({
+      code: "custom",
+      message: "URL protocol must be http or https",
+    });
+    return z.NEVER;
+  }
+
+  return parsedUrl.href;
+});
+
+export const InAppAgentMessageSourceSchema = z.object({
+  title: z.string(),
+  url: AbsoluteHttpUrlSchema,
+  faviconUrl: AbsoluteHttpUrlSchema,
+});
+
+export type InAppAgentMessageSource = z.infer<
+  typeof InAppAgentMessageSourceSchema
+>;
+
 const AgUiToolSchema = z.object({
   name: z.string(),
   description: z.string(),
-  parameters: z.any().optional(),
-  metadata: z.record(z.string(), z.any()).optional(),
+  parameters: z.unknown().optional(),
+  metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 const AgUiContextSchema = z.object({
@@ -129,11 +203,11 @@ export const AgUiRunAgentInputSchema = z.object({
   threadId: z.string(),
   runId: z.string(),
   parentRunId: z.string().optional(),
-  state: z.any().optional(),
+  state: z.unknown().optional(),
   messages: z.array(AgUiMessageSchema),
   tools: z.array(AgUiToolSchema),
   context: z.array(AgUiContextSchema),
-  forwardedProps: z.any().optional(),
+  forwardedProps: z.unknown().optional(),
 });
 
 export type AgUiRunAgentInput = z.infer<typeof AgUiRunAgentInputSchema>;
@@ -151,27 +225,41 @@ export type AgUiCustomEvent = AgUiEvent & {
   value: unknown;
 };
 
+export const InAppAgentToolApprovalRequestSchema = z.object({
+  type: z.literal("tool_approval_request"),
+  toolCallId: z.string().min(1),
+  toolName: z.string().min(1),
+  args: z.unknown().optional(),
+  runId: z.string().min(1),
+});
+
+export type InAppAgentToolApprovalRequest = z.infer<
+  typeof InAppAgentToolApprovalRequestSchema
+>;
+
+export const ResumeForwardedPropsSchema = z.object({
+  command: z.object({
+    resume: z.object({
+      approved: z.boolean(),
+      approvalRequest: InAppAgentToolApprovalRequestSchema,
+    }),
+  }),
+});
+
+export type ResumeForwardedProps = z.infer<typeof ResumeForwardedPropsSchema>;
+
 export const InAppAgentRuntimeStateSchema = z.discriminatedUnion("type", [
   z.object({
-    type: z.literal("newSession"),
+    type: z.literal("newConversation"),
     projectId: z.string(),
   }),
   z.object({
-    type: z.literal("existingSession"),
-    claudeSessionToken: z.string(),
+    type: z.literal("existingConversation"),
+    projectId: z.string(),
+    conversationId: z.string(),
   }),
 ]);
 
 export type InAppAgentRuntimeState = z.infer<
   typeof InAppAgentRuntimeStateSchema
->;
-
-export const PersistentInAppAiAgentSessionSchema = z.object({
-  threadId: z.string().optional(),
-  state: InAppAgentRuntimeStateSchema,
-  messages: z.array(AgUiMessageSchema).default([]),
-});
-
-export type PersistentInAppAiAgentSession = z.infer<
-  typeof PersistentInAppAiAgentSessionSchema
 >;
