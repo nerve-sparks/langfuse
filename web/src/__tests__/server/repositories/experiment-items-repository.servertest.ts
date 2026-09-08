@@ -18,7 +18,7 @@ import { type FilterCondition } from "@langfuse/shared";
  * Wraps createEvent with experiment defaults.
  */
 function createExperimentEvent(
-  params: Partial<EventRecordInsertType> & {
+  params: Parameters<typeof createEvent>[0] & {
     experimentId: string;
     experimentName: string;
     datasetId?: string;
@@ -1393,7 +1393,7 @@ describe("Clickhouse Experiment Items Repository Test", () => {
         start_time: now,
       });
 
-      // Item 1 in comparison
+      // Item 1 in comparison, created before the baseline
       const event1Comp = createExperimentEvent({
         project_id: projectId,
         trace_id: item1CompTraceId,
@@ -1403,7 +1403,7 @@ describe("Clickhouse Experiment Items Repository Test", () => {
         datasetId: datasetId,
         itemId: item1Id,
         experimentItemRootSpanId: item1CompRootId,
-        start_time: now + 1000,
+        start_time: now - 1000,
       });
 
       // Item 2 ONLY in comparison (not in baseline)

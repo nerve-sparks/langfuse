@@ -31,6 +31,10 @@ import { ClickHouseClientConfigOptions } from "@clickhouse/client";
 import { shouldSkipObservationsFinal } from "../queries/clickhouse-sql/query-options";
 import { convertDateToClickhouseDateTime } from "../clickhouse/client";
 import type { TraceDeleteBatchActionCursor } from "../../features/batchAction/types";
+import {
+  planScoreFilterPushdown,
+  resolveScoreDataRequirement,
+} from "../queries/clickhouse-sql/score-filter-pushdown";
 
 export type TracesTableReturnType = Pick<
   TraceRecordReadType,
@@ -107,7 +111,10 @@ export const convertToUiTableRows = (
 export const convertToUITableMetrics = (
   row: TracesTableMetricsClickhouseReturnType,
 ): Omit<TracesMetricsUiReturnType, "scores"> => {
+  // Both are aggregates, not raw buckets: reduceUsageOrCostDetails sums every
+  // bucket whose key contains "input"/"output"
   const usageDetails = reduceUsageOrCostDetails(row.usage_details);
+  const costDetails = reduceUsageOrCostDetails(row.cost_details);
 
   return {
     id: row.id,
@@ -132,11 +139,11 @@ export const convertToUITableMetrics = (
     calculatedTotalCost: row.cost_details?.total
       ? new Decimal(row.cost_details.total)
       : null,
-    calculatedInputCost: row.cost_details?.input
-      ? new Decimal(row.cost_details.input)
+    calculatedInputCost: costDetails.input
+      ? new Decimal(costDetails.input)
       : null,
-    calculatedOutputCost: row.cost_details?.output
-      ? new Decimal(row.cost_details.output)
+    calculatedOutputCost: costDetails.output
+      ? new Decimal(costDetails.output)
       : null,
     level: row.level,
     debugCount: BigInt(row.debug_count ?? 0),
@@ -274,10 +281,12 @@ async function getTracesTableGeneric(props: FetchTracesTableProps) {
       f.field === "timestamp" && (f.operator === ">=" || f.operator === ">"),
   ) as DateTimeFilter | undefined;
 
-  const requiresScoresJoin =
-    tracesFilter.find((f) => f.clickhouseTable === "scores") !== undefined ||
+  const ordersByScoreData =
     findUiColumnMapping(tracesTableUiColumnDefinitions, orderBy?.column)
       ?.clickhouseTableName === "scores";
+  const requiresScoresJoin =
+    tracesFilter.find((f) => f.clickhouseTable === "scores") !== undefined ||
+    ordersByScoreData;
 
   const requiresObservationsJoin =
     tracesFilter.find((f) => f.clickhouseTable === "observations") !==
@@ -288,6 +297,13 @@ async function getTracesTableGeneric(props: FetchTracesTableProps) {
   const tracesFilterRes = tracesFilter.apply();
   const scoresFilterRes = scoresFilter.apply();
   const observationFilterRes = observationsFilter.apply();
+  const scoreRowsFilter = planScoreFilterPushdown({
+    filters: tracesFilter,
+    scoreDataRequirement: resolveScoreDataRequirement({
+      selectsScoreData: select === "metrics",
+      ordersByScoreData,
+    }),
+  });
 
   const observationsAndScoresCTE = `
     WITH observations_stats AS (
@@ -343,6 +359,7 @@ async function getTracesTableGeneric(props: FetchTracesTableProps) {
                     project_id = {projectId: String}
                     ${timeStampFilter ? `AND s.timestamp >= {traceTimestamp: DateTime64(3)} - ${SCORE_TO_TRACE_OBSERVATIONS_INTERVAL}` : ""}
                     ${scoresFilterRes ? `AND ${scoresFilterRes.query}` : ""}
+                    ${scoreRowsFilter ? `AND ${scoreRowsFilter.query}` : ""}
                   GROUP BY
                     project_id,
                     trace_id,
@@ -518,6 +535,7 @@ async function getTracesTableGeneric(props: FetchTracesTableProps) {
       ...tracesFilterRes.params,
       ...observationFilterRes.params,
       ...scoresFilterRes.params,
+      ...scoreRowsFilter?.params,
       ...search.params,
     },
     tags: { ...(props.tags ?? {}), projectId },

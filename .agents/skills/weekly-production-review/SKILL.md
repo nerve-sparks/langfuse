@@ -1,13 +1,9 @@
 ---
 name: weekly-production-review
 description: |
-  Prepare Langfuse weekly production reviews that audit what broke, what was
-  fixed, what remains open, and where Datadog, incident.io, or Linear tracking
-  needs cleanup. Use when asked for a production review, "what broke last week",
-  fixed/open production bugs, Datadog alerted monitors/pages, Datadog error log
-  patterns, incident.io incidents, incident.io alert load, pager load by
-  engineer or time of day, or a source-table engineering review across
-  incident.io, Linear bugs, Datadog alerts, and Datadog logs.
+  Prepare Langfuse weekly production reviews covering failures, fixes, open
+  issues, and tracking gaps. Use for "what broke last week," production bugs,
+  Datadog alerts or error patterns, incident.io activity, or pager load.
 ---
 
 # Weekly Production Review
@@ -22,10 +18,15 @@ audit from the linked source rows.
   timezone. State both local and UTC query windows in one short scope line.
 - Cover all production environments unless the user narrows scope:
   `prod-us`, `prod-eu`, `prod-hipaa`, and `prod-jp`.
-- Keep the first pass read-only. Do not create or update Linear issues,
-  comments, incident.io records, follow-ups, alerts, Datadog monitors, files,
-  Slack messages, or production systems unless the user explicitly asks after
-  reviewing the findings.
+- The review itself changes nothing outside the tracker. Do not touch incident.io
+  records, follow-ups, alerts, monitors, files, Slack messages, or production
+  systems unless the user explicitly asks after reviewing the findings.
+- Linear is the exception: evidence may be commented onto issues that already
+  exist, labelled and marked as agent-written. A new issue has no parent, so it
+  is the one write that asks first — show the set, take one go-ahead, then file
+  them. [`linear-agent-writes`](../linear-agent-writes/SKILL.md) is the authority;
+  [`linear-bug-triage`](../linear-bug-triage/SKILL.md) applies it to measured
+  findings.
 - For chat-only reviews, avoid creating report artifacts or local analysis
   workspaces unless a required tool workflow explicitly does so or the user asks
   for a file. If incident.io analysis tooling requires a local playbook
@@ -38,11 +39,12 @@ audit from the linked source rows.
 
 - Use [`datadog-query-recipes`](../datadog-query-recipes/SKILL.md) for
   production Datadog query shapes and environment/site routing.
-- Use [`linear-bug-triage`](../linear-bug-triage/SKILL.md) only after a human
-  explicitly approves a Linear write-back.
+- Use [`linear-bug-triage`](../linear-bug-triage/SKILL.md) for the Linear
+  write-back: it comments measured evidence onto existing issues, and files new
+  ones once you approve the set.
 - Use [`incident-alert-tickets`](../incident-alert-tickets/SKILL.md) to check
-  each Datadog alert cluster against the per-monitor knowledge base and, only
-  after explicit human approval, record newly root-caused clusters there.
+  each alert cluster against the per-monitor knowledge base and record newly
+  root-caused clusters there as a labelled description edit.
 
 ## Workflow
 

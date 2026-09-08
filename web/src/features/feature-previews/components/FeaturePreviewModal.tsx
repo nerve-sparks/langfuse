@@ -12,29 +12,30 @@ import {
 import { Switch } from "@/src/components/design-system/Switch/Switch";
 import { Button } from "@/src/components/ui/button";
 import { cn } from "@/src/utils/tailwind";
+import {
+  featurePreviewLabels,
+  type FeaturePreviewFlag,
+} from "@/src/features/feature-flags/available-flags";
 
-import filterSearchBarDarkIllustration from "../assets/filter-search-bar-dark.svg";
-import filterSearchBarLightIllustration from "../assets/filter-search-bar-light.svg";
 import modernSessionDarkIllustration from "../assets/modern-session-dark.svg";
 import modernSessionLightIllustration from "../assets/modern-session-light.svg";
+import improvedMessageRenderingDarkIllustration from "../assets/improved-message-rendering-dark.svg";
+import improvedMessageRenderingLightIllustration from "../assets/improved-message-rendering-light.svg";
 
 /** Flags the Feature Preview modal can toggle. Keep in sync with the
- *  userAccount.setFeaturePreviewEnabled allowlist and available-flags.ts.
- *  `searchBar` is retired and no longer renders a tile — see
- *  ControlledFeaturePreviewModal. It remains as rollback plumbing.
- *  TODO(remove ~2026-06-19): drop "searchBar" once GA is confirmed. */
-export type PreviewFlag = "modernSession" | "searchBar";
+ *  userAccount.setFeaturePreviewEnabled allowlist and available-flags.ts. */
+export type PreviewFlag = FeaturePreviewFlag;
 
 type PreviewIllustration = {
   light: React.ComponentProps<typeof Image>["src"];
   dark: React.ComponentProps<typeof Image>["src"];
   alt: string;
+  width?: number;
+  height?: number;
 };
 
 type PreviewRegistryItem = {
   flag: PreviewFlag;
-  title: string;
-  sidebarLabel: string;
   description: string;
   details: string;
   feedbackUrl: string;
@@ -56,8 +57,6 @@ export type PreviewState = {
 const PREVIEW_REGISTRY: PreviewRegistryItem[] = [
   {
     flag: "modernSession",
-    title: "Compact Session View",
-    sidebarLabel: "Compact Session View",
     description:
       "Navigate every trace in a session from one continuous conversation feed, with tools and structured data available on demand.",
     details:
@@ -69,23 +68,17 @@ const PREVIEW_REGISTRY: PreviewRegistryItem[] = [
       alt: "Compact Session View showing a trace minimap beside a continuous session conversation feed.",
     },
   },
-  // TODO(remove ~2026-06-19): dead registry entry — "searchBar" is GA on the v4
-  // events tables and no longer surfaced in the dialog (no state entry in
-  // ControlledFeaturePreviewModal), so this is filtered out and never renders.
-  // Kept for a safe rollback; delete with the rest of the searchBar plumbing.
   {
-    flag: "searchBar",
-    title: "Filter Search Bar",
-    sidebarLabel: "Filter Search Bar",
+    flag: "normalizedIoPreview",
     description:
-      "A keyboard-driven query bar on the Observations and Traces tables — type filters like level:ERROR -env:dev latency:>2 with inline suggestions, alongside the existing filter sidebar.",
+      "Render the Formatted view of trace and observation input/output more faithfully — chat messages, tool calls, and reasoning are recognized across a wide range of model providers and frameworks.",
     details:
-      "The search bar lets you build and edit filters by typing a compact query language with autocomplete, instead of clicking through the sidebar. It stays in sync with the sidebar (both read and write the same filter state) and supports field filters, comparisons, any-of groups, negation, metadata/score paths, and full-text search across input/output. It is available on the new (v4) Observations and Traces tables.",
-    feedbackUrl: "https://github.com/orgs/langfuse/discussions/14196",
+      "A new parser understands the conventions of OpenAI, Anthropic, Gemini, LangChain, the Vercel AI SDK, OpenTelemetry GenAI, Pydantic AI, and more. Messages, tool calls, tool results, and reasoning render as structured blocks in the Formatted view instead of falling back to raw JSON. When enabled, the Formatted tab is powered by this parser everywhere trace and observation I/O is shown.",
+    feedbackUrl: "https://github.com/orgs/langfuse/discussions",
     illustration: {
-      light: filterSearchBarLightIllustration,
-      dark: filterSearchBarDarkIllustration,
-      alt: "The filter search bar turns typed queries like level:ERROR -env:dev into Observations and Traces table filters with inline suggestions.",
+      light: improvedMessageRenderingLightIllustration,
+      dark: improvedMessageRenderingDarkIllustration,
+      alt: "Formatted trace view rendering a user message, an assistant reply, a tool call, and a reasoning block as distinct structured cards.",
     },
   },
 ];
@@ -151,7 +144,7 @@ export function FeaturePreviewModal({
                   >
                     <span className="min-w-0">
                       <span className="block text-sm font-bold">
-                        {item.sidebarLabel}
+                        {featurePreviewLabels[item.flag]}
                       </span>
                       <span className="text-muted-foreground mt-1 line-clamp-2 block text-xs">
                         {state[item.flag]?.disabled
@@ -179,7 +172,7 @@ export function FeaturePreviewModal({
                 <div className="flex items-start justify-between gap-6">
                   <div>
                     <h2 className="text-foreground text-xl font-bold">
-                      {selected.title}
+                      {featurePreviewLabels[selected.flag]}
                     </h2>
                     <p className="text-muted-foreground mt-2 max-w-2xl text-sm leading-5">
                       {selected.description}
@@ -202,7 +195,7 @@ export function FeaturePreviewModal({
                         selectedState.isToggling === true
                       }
                       onCheckedChange={selectedState.onToggle}
-                      aria-label={`Toggle ${selected.title}`}
+                      aria-label={`Toggle ${featurePreviewLabels[selected.flag]}`}
                     />
                   </div>
                 </div>
@@ -231,11 +224,15 @@ function PreviewMockupPanel({
       <Image
         src={illustration.light}
         alt={illustration.alt}
+        width={illustration.width}
+        height={illustration.height}
         className="block h-auto w-full dark:hidden"
       />
       <Image
         src={illustration.dark}
         alt={illustration.alt}
+        width={illustration.width}
+        height={illustration.height}
         className="hidden h-auto w-full dark:block"
       />
     </div>

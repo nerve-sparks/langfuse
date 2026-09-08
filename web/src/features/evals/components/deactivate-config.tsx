@@ -1,6 +1,7 @@
+/* eslint-disable @repo/no-abstracted-overlay-trigger */
+import { useHasProjectAccess } from "@/src/features/rbac";
 import { EvaluatorStatus } from "@/src/features/evals/types";
-import { usePostHogClientCapture } from "@/src/features/posthog-analytics/usePostHogClientCapture";
-import { useHasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
+import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
 import { api, type RouterOutputs } from "@/src/utils/api";
 import { useState } from "react";
 import {
@@ -16,12 +17,18 @@ import { useEvalCapabilities } from "@/src/features/evals/hooks/useEvalCapabilit
 export function DeactivateEvalConfig({
   projectId,
   evalConfig,
+  onStatusChange,
 }: {
   projectId: string;
   evalConfig: RouterOutputs["evals"]["configById"];
+  /** Called when the user confirms an activate/deactivate toggle. */
+  onStatusChange?: () => void;
 }) {
   const utils = api.useUtils();
-  const hasAccess = useHasProjectAccess({ projectId, scope: "evalJob:CUD" });
+  const hasAccess = useHasProjectAccess({
+    projectId,
+    scope: "evaluationRule:CUD",
+  });
   const { allowLegacy } = useEvalCapabilities(projectId);
   const [isOpen, setIsOpen] = useState(false);
   const capture = usePostHogClientCapture();
@@ -40,7 +47,7 @@ export function DeactivateEvalConfig({
     },
   });
 
-  const onClick = () => {
+  const onClick = async () => {
     if (!projectId) {
       console.error("Project ID is missing");
       return;
@@ -53,18 +60,25 @@ export function DeactivateEvalConfig({
 
     const prevStatus = evalConfig?.status;
 
-    mutEvaluator.mutateAsync({
-      projectId,
-      evalConfigId: evalConfig?.id ?? "",
-      config: {
-        status: isActive ? EvaluatorStatus.INACTIVE : EvaluatorStatus.ACTIVE,
-      },
-    });
+    try {
+      await mutEvaluator.mutateAsync({
+        projectId,
+        evalConfigId: evalConfig?.id ?? "",
+        config: {
+          status: isActive ? EvaluatorStatus.INACTIVE : EvaluatorStatus.ACTIVE,
+        },
+      });
+    } catch {
+      // The default mutation error toast reports the failure; the status is
+      // unchanged, so keep the popover open and skip the change callbacks.
+      return;
+    }
     capture(
       prevStatus === EvaluatorStatus.ACTIVE
         ? "eval_config:deactivate"
         : "eval_config:activate",
     );
+    onStatusChange?.();
     setIsOpen(false);
   };
 

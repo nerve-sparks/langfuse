@@ -133,10 +133,18 @@ export const transformDbDatasetRunItemToAPIDatasetRunItemCh = (
 export const transformDbDatasetToAPIDataset = (
   dataset: DbDataset,
 ): z.infer<typeof APIDataset> =>
+  // The secret-bearing columns (secretKey, requestHeaders) are already
+  // excluded from Prisma results by the global omit in db.ts. Stripping them
+  // here again guarantees that even if an upstream read ever opts back into
+  // them via an explicit select, they can never leave through the public API.
   removeObjectKeys(dataset, [
     "remoteExperimentUrl",
     "remoteExperimentPayload",
     "remoteExperimentEnabled",
+    "remoteExperimentSecretKey",
+    "remoteExperimentDisplaySecretKey",
+    "remoteExperimentRequestHeaders",
+    "remoteExperimentDisplayHeaders",
   ]);
 
 /**
@@ -327,7 +335,7 @@ export const GetDatasetV1Query = z.object({
   name: queryStringZod,
 });
 export const GetDatasetV1Response = APIDataset.extend({
-  items: z.array(APIDatasetItem),
+  items: z.array(APIDatasetItem.omit({ mediaReferences: true })),
   runs: z.array(z.string()), // dataset run names
 }).strict();
 

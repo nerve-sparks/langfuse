@@ -1,15 +1,16 @@
+/* eslint-disable @repo/no-margin-on-root-elements */
 import React, { useState } from "react";
 import { cn } from "@/src/utils/tailwind";
 import Image from "next/image";
-import { InfoIcon } from "lucide-react";
+import { InfoIcon, type LucideIcon } from "lucide-react";
 import { ActionButton } from "@/src/components/ActionButton";
-import { Alert, AlertTitle, AlertDescription } from "@/src/components/ui/alert";
-import { StatusBadge } from "@/src/components/layouts/status-badge";
+import { Alert } from "@/src/components/design-system/Alert/Alert";
+import { StatusBadge } from "@/src/components/ui/StatusBadge/StatusBadge";
 
 export interface ValueProposition {
   title: string;
   description: string;
-  icon?: React.ReactNode;
+  icon?: LucideIcon;
 }
 
 export interface ActionConfig {
@@ -19,7 +20,7 @@ export interface ActionConfig {
   component?: React.ReactNode;
 }
 
-export interface Step {
+interface Step {
   title: string;
   description?: string;
   badge?: React.ReactNode;
@@ -109,13 +110,11 @@ export function SplashScreen({
     <div className="mx-auto flex max-w-4xl flex-col items-center p-8">
       <div className="mb-6 text-center">
         {waitingFor && (
-          <StatusBadge
-            type="waiting"
-            showText={false}
-            className="mb-3 px-3 py-1 text-sm"
-          >
-            {waitingFor}
-          </StatusBadge>
+          <div className="mb-3">
+            <StatusBadge type="waiting" showText={false} size="lg">
+              {waitingFor}
+            </StatusBadge>
+          </div>
         )}
         <h2 className="mb-2 text-2xl font-bold">{title}</h2>
         {/* text-base: without a size token this fell through to the 16px
@@ -148,11 +147,12 @@ export function SplashScreen({
       </div>
 
       {gettingStarted && (
-        <Alert className="w-full max-w-3xl">
-          <InfoIcon className="mr-2 h-4 w-4" />
-          <AlertTitle>Getting Started</AlertTitle>
-          <AlertDescription>{gettingStarted}</AlertDescription>
-        </Alert>
+        <div className="w-full max-w-3xl">
+          <Alert icon={InfoIcon}>
+            <Alert.Title>Getting Started</Alert.Title>
+            <Alert.Description>{gettingStarted}</Alert.Description>
+          </Alert>
+        </div>
       )}
 
       {videoPosition === "top" && mediaBlock}
@@ -199,10 +199,9 @@ export function SplashScreen({
       {valuePropositions.length > 0 && (
         <div className="my-6 grid w-full max-w-3xl grid-cols-1 gap-4 md:grid-cols-2">
           {valuePropositions.map((prop, index) => (
-            <Alert key={index}>
-              {prop.icon}
-              <AlertTitle>{prop.title}</AlertTitle>
-              <AlertDescription>{prop.description}</AlertDescription>
+            <Alert key={index} icon={prop.icon}>
+              <Alert.Title>{prop.title}</Alert.Title>
+              <Alert.Description>{prop.description}</Alert.Description>
             </Alert>
           ))}
         </div>
