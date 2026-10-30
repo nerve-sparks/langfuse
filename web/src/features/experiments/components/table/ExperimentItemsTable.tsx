@@ -1,19 +1,24 @@
+/* eslint-disable no-nested-ternary, react/no-unstable-nested-components */
 /* eslint-disable @repo/no-style-props */
+import { useRouter } from "next/router";
 import { useExperimentResultsState } from "@/src/features/experiments/hooks/useExperimentResultsState";
 import { DataTableToolbar } from "@/src/components/table/data-table-toolbar";
-import {
-  DataTableControlsProvider,
-  DataTableControls,
-} from "@/src/components/table/data-table-controls";
-import { ResizableFilterLayout } from "@/src/components/table/resizable-filter-layout";
+import { Button } from "@/src/components/design-system/Button/Button";
+import { DataTableControlsProvider } from "@/src/components/table/data-table-controls";
+import { ExperimentFilterSidebar } from "../filters/ExperimentFilterSidebar";
+import { SearchableTableFilterLayout } from "@/src/components/table/resizable-filter-layout";
 import { useEffect, useMemo, useState, useRef, useCallback } from "react";
-import { RunEvaluationDialog } from "@/src/features/batch-actions/components/RunEvaluationDialog";
-import { LightbulbIcon } from "lucide-react";
+import { RunEvaluationDialog } from "@/src/features/batch-actions";
+import { LightbulbIcon } from "@langfuse/icons";
 import { useHasProjectAccess } from "@/src/features/rbac";
-import { TableActionMenu } from "@/src/features/table/components/TableActionMenu";
-import { type TableAction } from "@/src/features/table/types";
+import {
+  TableActionMenu,
+  type TableAction,
+  TableSelectionManager,
+  useSelectAll,
+} from "@/src/features/table";
 import { usePaginationState } from "@/src/hooks/usePaginationState";
-import { useSidebarFilterState } from "@/src/features/filters/hooks/useSidebarFilterState";
+import { useSidebarFilterState } from "@/src/features/filters";
 import {
   getExperimentItemsColumnName,
   experimentItemsFilterConfig,
@@ -21,42 +26,49 @@ import {
 import { type LangfuseColumnDef } from "@/src/components/table/types";
 import {
   type AggregatedScoreData,
-  type FilterState,
-  type FilterCondition,
   TableViewPresetTableName,
   BatchExportTableName,
   ActionId,
   BatchActionType,
   EXPERIMENT_IO_TRUNCATE_LENGTH,
 } from "@langfuse/shared";
-import { ExperimentFilterPills } from "./ExperimentFilterPills";
+import {
+  getExperimentBatchEvaluationFilters,
+  groupExperimentFilters,
+} from "../../lib/experimentFilterTargets";
 import { usePostHogClientCapture } from "@/src/features/posthog-analytics";
 import {
   COMPARISON_OPERATOR_PROPERTY,
   itemRegressionFilterAppliedProps,
   scoreColumnScopeToggledProps,
 } from "@/src/features/experiments/lib/analytics";
-import { type ColumnGroupTogglePayload } from "@/src/components/table/data-table-column-visibility-filter";
-import { useOrderByState } from "@/src/features/orderBy/hooks/useOrderByState";
-import { useRowHeightLocalStorage } from "@/src/components/table/data-table-row-height-switch";
-import useColumnOrder from "@/src/features/column-visibility/hooks/useColumnOrder";
+import { type ColumnGroupTogglePayload } from "@/src/components/table/DataTableColumnVisibilityFilter";
+import { useOrderByState } from "@/src/features/orderBy";
+import {
+  customRowHeightMenu,
+  getRowHeightIOCharLimit,
+  useAdjustableRowHeight,
+} from "@/src/components/table/data-table-row-height-switch";
+import {
+  useColumnOrder,
+  useColumnVisibility,
+} from "@/src/features/column-visibility";
 import { buildLocalIsoDatePresentation } from "@/src/utils/dates";
 import { usdFormatter, latencyFormatter } from "@/src/utils/numbers";
-import {
-  type RowSelectionState,
-  type VisibilityState,
-} from "@tanstack/react-table";
-import { IdTableCell } from "@/src/components/design-system/table/components/IdTableCell/IdTableCell";
-import { createIdTableColumn } from "@/src/components/design-system/table/columns/createIdTableColumn";
+import { type RowSelectionState } from "@tanstack/react-table";
 import { createIOTableColumn } from "@/src/components/design-system/table/columns/createIOTableColumn";
 import { usePeekNavigation } from "@/src/components/table/peek/hooks/usePeekNavigation";
-import { ExperimentGridView } from "./ExperimentGridView";
-import { useDetailPageLists } from "@/src/features/navigate-detail-pages/context";
+import {
+  ExperimentGridView,
+  GRID_VIEW_ROW_HEIGHTS,
+} from "./ExperimentGridView";
+import { useDetailPageLists } from "@/src/features/navigate-detail-pages";
 import { useTableViewManager } from "@/src/components/table/table-view-presets/hooks/useTableViewManager";
-import { TableSelectionManager } from "@/src/features/table/components/TableSelectionManager";
-import { useSelectAll } from "@/src/features/table/hooks/useSelectAll";
-import useColumnVisibility from "@/src/features/column-visibility/hooks/useColumnVisibility";
+import { useTableViewFilterChange } from "@/src/components/table/table-view-presets/hooks/useTableViewFilterChange";
+import { TableSearchBar, toObservedOptions } from "@/src/features/search-bar";
+import { useExperimentItemsSearchRegistry } from "../../hooks/useExperimentItemsSearchRegistry";
 import { useExperimentItemsTableData } from "../../hooks/useExperimentItemsTableData";
+import { useExpectedOutputVisibility } from "../../hooks/useExpectedOutputVisibility";
 import {
   type ExperimentItemsTableRow,
   type ExperimentItemsTableProps,
@@ -64,29 +76,35 @@ import {
   type ExperimentOutputData,
   getExperimentColorStyles,
 } from "./types";
+import { EmptyValue } from "@/src/components/design-system/table/components/EmptyValue/EmptyValue";
 import { ConnectedIOTableCell } from "@/src/components/table/ConnectedIOTableCell";
-import { Badge } from "@/src/components/ui/badge";
+import { Badge } from "@/src/components/design-system/Badge/Badge";
 import { type DataTablePeekViewProps } from "@/src/components/table/peek";
 import { cn } from "@/src/utils/tailwind";
-import { createScoreColumns } from "@/src/features/scores/hooks/useScoreColumns";
 import {
   collectPresentScoreKeys,
-  revealScoreColumns,
+  composeAggregateScoreKey,
+  createScoreColumns,
   withPresentScoreKeys,
-} from "@/src/features/scores/lib/scoreColumns";
-import { composeAggregateScoreKey } from "@/src/features/scores/lib/aggregateScores";
+} from "@/src/features/scores";
 import { Skeleton } from "@/src/components/ui/skeleton";
-import { ExperimentCompareTable } from "./ExperimentCompareTable";
+import {
+  ExperimentCompareTable,
+  LIST_VIEW_ROW_HEIGHTS,
+} from "./ExperimentCompareTable";
+import { useExperimentItemsScoreCache } from "@/src/features/experiments/hooks/useExperimentItemsScoreCache";
 import { useExperimentNames } from "@/src/features/experiments/hooks/useExperimentNames";
 import {
   useExperimentItemsFilterOptions,
   type ScoreColumnDef,
 } from "@/src/features/experiments/hooks/useExperimentItemsFilterOptions";
-import { DiffLabel } from "@/src/features/datasets/components/DiffLabel";
+import {
+  calculateNumericDiff,
+  computeScoreDiffs,
+  DiffLabel,
+} from "@/src/features/datasets";
 import { describeRunComparison } from "@/src/features/experiments/fns/describeRunComparison";
-import { calculateNumericDiff } from "@/src/features/datasets/lib/calculateBaselineDiff";
-import { computeScoreDiffs } from "@/src/features/datasets/lib/computeScoreDiffs";
-import { TablePeekViewExperimentItemDetail } from "@/src/components/table/peek/peek-experiment-item-detail";
+import { TablePeekViewExperimentItemDetail } from "@/src/components/table/peek/TablePeekViewExperimentItemDetail";
 import { NotRecordedMetric } from "./NotRecordedMetric";
 import {
   summariseScoreColumn,
@@ -112,6 +130,32 @@ import {
   type ScoreLevel,
 } from "@/src/features/experiments/fns/scoreComparisonFilter";
 import { resetStaleDefaultColumnOrder } from "@/src/features/experiments/fns/experimentItemsColumnOrder";
+import { shouldIgnoreRowClickTarget } from "@/src/components/table/shouldIgnoreRowClickTarget";
+import { resolveExperimentPeekTarget } from "@/src/features/experiments/fns/resolveExperimentPeekTarget";
+
+/**
+ * A row on its way into the peek, carrying which experiment's cell was
+ * clicked. Absent for a click on the row itself, which still opens the
+ * baseline.
+ */
+type ClickedExperimentRow = ExperimentItemsTableRow & {
+  clickedExperimentId?: string;
+};
+
+/** `usePeekNavigation`'s `openPeek`, as the cell handlers need it. */
+type PeekOpener = (itemId: string, row: ClickedExperimentRow) => void;
+
+/**
+ * Opens the peek on one experiment's cell. Passed to every per-experiment
+ * cell; `undefined` when the peek cannot open, which also removes the
+ * pointer affordance.
+ */
+type ExperimentCellClickHandler = (
+  event: React.MouseEvent,
+  row: ExperimentItemsTableRow,
+  experimentId: string,
+) => void;
+
 const renderExperimentSpecificHeader = (label: string) => (
   <span className="text-muted-foreground">{label}</span>
 );
@@ -141,7 +185,7 @@ function toScoreColumnInput(scoreColumnDefs: ScoreColumnDef[]): Array<{
 /**
  * One summary per score column: the primary experiment's aggregate over the
  * items in view, and the same for the comparison it is read against. Built once
- * per fetch rather than per header render.
+ * per score snapshot rather than per header render.
  */
 function buildScoreColumnSummaries({
   rows,
@@ -185,11 +229,6 @@ function buildScoreColumnSummaries({
   return summaries;
 }
 
-const getDefaultExperimentFilterTarget = (props: {
-  baselineId?: string;
-  comparisonIds: string[];
-}) => props.baselineId ?? props.comparisonIds[0];
-
 const shouldEnableExperimentPeek = (props: {
   hasBaseline: boolean;
   hideControls: boolean;
@@ -209,7 +248,7 @@ const formatScoreAggregateValue = (
 ): string => {
   if (!aggregate) return "nothing";
   return aggregate.type === "NUMERIC"
-    ? aggregate.average.toFixed(4)
+    ? aggregate.average.toFixed(2)
     : (aggregate.values[0] ?? "nothing");
 };
 
@@ -219,12 +258,17 @@ const StackedExperimentCell = ({
   colorExperimentIds,
   renderValue,
   className,
+  row,
+  onExperimentClick,
 }: {
   experiments: ExperimentItemData[];
   allExperimentIds: string[];
   colorExperimentIds?: string[];
   renderValue: (exp: ExperimentItemData) => React.ReactNode;
   className?: string;
+  row?: ExperimentItemsTableRow;
+  /** Clicking one experiment's line opens that run, not the row's baseline. */
+  onExperimentClick?: ExperimentCellClickHandler;
 }) => {
   const experimentsById = useMemo(
     () => new Map(experiments.map((exp) => [exp.experimentId, exp])),
@@ -245,10 +289,21 @@ const StackedExperimentCell = ({
           colorExperimentIds ?? allExperimentIds,
         );
         const content = exp ? renderValue(exp) : null;
+        // Clickable because this run exists for the item — never because it
+        // rendered a value. A run with an empty value still has a trace.
+        const isClickable = Boolean(exp && row && onExperimentClick);
         return (
           <div
             key={experimentId}
-            className="flex min-h-0 items-start overflow-hidden py-0.5 pr-2 pl-1.5"
+            className={cn(
+              "flex min-h-0 items-start overflow-hidden py-0.5 pr-2 pl-1.5",
+              isClickable && "cursor-pointer",
+            )}
+            onClick={
+              isClickable
+                ? (event) => onExperimentClick?.(event, row!, experimentId)
+                : undefined
+            }
           >
             {content ? (
               <>
@@ -261,7 +316,7 @@ const StackedExperimentCell = ({
                 {content}
               </>
             ) : (
-              <span className="text-muted-foreground">—</span>
+              <EmptyValue />
             )}
           </div>
         );
@@ -302,6 +357,7 @@ const StackedOutputRow = ({
       />
       <ConnectedIOTableCell
         data={output}
+        followRowHeight={false}
         singleLine={singleLine}
         variant="output"
       />
@@ -334,17 +390,17 @@ const matchesExpectedOutput = (
 };
 
 const ExpectedMatchChip = ({ matches }: { matches: boolean }) => (
-  <Badge
-    size="sm"
-    variant={matches ? "success" : "error"}
-    className="mt-0.5 ml-1 shrink-0 font-bold"
-  >
-    {matches ? "match" : "differs"}
-  </Badge>
+  <span className="mt-0.5 ml-1 inline-flex shrink-0">
+    <Badge
+      color={matches ? "green" : "red"}
+      text={matches ? "match" : "differs"}
+    />
+  </span>
 );
 
 /**
  * Cell component that renders stacked output values for each experiment.
+ * Display chooses text or JSON. Row height does not.
  */
 const StackedOutputCell = ({
   outputs,
@@ -353,6 +409,8 @@ const StackedOutputCell = ({
   singleLine,
   isLoading,
   expectedOutput,
+  row,
+  onExperimentClick,
 }: {
   outputs: ExperimentOutputData[];
   allExperimentIds: string[];
@@ -365,6 +423,9 @@ const StackedOutputCell = ({
    * mode, and for the items that simply have no expected output.
    */
   expectedOutput?: string | null;
+  row?: ExperimentItemsTableRow;
+  /** Clicking one experiment's line opens that run, not the row's baseline. */
+  onExperimentClick?: ExperimentCellClickHandler;
 }) => {
   const outputsByExperimentId = useMemo(
     () => new Map(outputs.map((out) => [out.experimentId, out])),
@@ -389,6 +450,7 @@ const StackedOutputCell = ({
             <ConnectedIOTableCell
               isLoading={false}
               data={expectedOutput ?? null}
+              followRowHeight={false}
               singleLine={singleLine}
             />
           </div>
@@ -404,15 +466,35 @@ const StackedOutputCell = ({
         const expectedMatch = showExpectedLine
           ? matchesExpectedOutput(out?.output, expectedOutput)
           : null;
+        // Gated on the run existing for this item, never on the output being
+        // truthy: a run that legitimately returned "" still has a trace to
+        // open, and testing the text would drop the handler and let the click
+        // fall through to the row — back to the baseline.
+        const hasRun = row?.experiments.some(
+          (exp) => exp.experimentId === experimentId,
+        );
+        const isClickable = Boolean(hasRun && row && onExperimentClick);
         return (
           <div
             key={experimentId}
-            className="flex min-h-0 items-start overflow-hidden py-0.5 pr-1 pl-1.5"
+            className={cn(
+              "flex min-h-0 items-start overflow-hidden py-0.5 pr-1 pl-1.5",
+              isClickable && "cursor-pointer",
+            )}
+            onClick={
+              isClickable
+                ? (event) => onExperimentClick?.(event, row!, experimentId)
+                : undefined
+            }
           >
             {isLoading ? (
               <div className="flex h-full min-h-0 min-w-0 items-start">
                 <span className="bg-muted mt-0.5 mr-2 block h-4 w-0.5 shrink-0 rounded-full" />
-                <ConnectedIOTableCell isLoading singleLine={singleLine} />
+                <ConnectedIOTableCell
+                  isLoading
+                  followRowHeight={false}
+                  singleLine={singleLine}
+                />
               </div>
             ) : out?.output ? (
               <StackedOutputRow
@@ -426,7 +508,9 @@ const StackedOutputCell = ({
                 }
               />
             ) : (
-              <span className="text-muted-foreground px-2 py-1">—</span>
+              <span className="px-2 py-1">
+                <EmptyValue />
+              </span>
             )}
           </div>
         );
@@ -449,7 +533,9 @@ export default function ExperimentItemsTable({
   projectId,
   ioRenderMode,
   hideControls = false,
+  toolbarSettings,
 }: ExperimentItemsTableProps) {
+  const router = useRouter();
   const { setDetailPageList } = useDetailPageLists();
   const [selectedRows, setSelectedRows] = useState<RowSelectionState>({});
   const [showRunEvaluationDialog, setShowRunEvaluationDialog] = useState(false);
@@ -463,6 +549,7 @@ export default function ExperimentItemsTable({
     hasBaseline,
     comparisonIds,
     allExperimentIds,
+    colorExperimentIds,
     layout,
     diffMode,
     itemVisibility,
@@ -474,15 +561,40 @@ export default function ExperimentItemsTable({
   const showComparisonDiff = diffMode !== "off";
   const isExpectedDiff = diffMode === "expected";
 
-  const defaultFilterTargetExperimentId = getDefaultExperimentFilterTarget({
-    baselineId,
-    comparisonIds,
-  });
   const hasSelectedRuns = allExperimentIds.length > 0;
   const canUsePeek = shouldEnableExperimentPeek({
     hasBaseline,
     hideControls,
   });
+
+  // `openPeek` lives on `usePeekNavigation` further down (it needs state this
+  // component only has by then), but the column builders below need a click
+  // handler at definition time. The ref bridges the two without making every
+  // memoized column depend on a callback that is a fresh literal each render.
+  const openPeekRef = useRef<PeekOpener | null>(null);
+  const openClickedExperimentPeek = useCallback(
+    (
+      event: React.MouseEvent,
+      row: ExperimentItemsTableRow,
+      experimentId: string,
+    ) => {
+      // A real control inside the cell (a link, a button) owns its own click.
+      if (shouldIgnoreRowClickTarget(event.target)) return;
+      // Otherwise the row handler would win and re-open the baseline.
+      event.stopPropagation();
+      openPeekRef.current?.(row.itemId, {
+        ...row,
+        clickedExperimentId: experimentId,
+      });
+    },
+    [],
+  );
+  // Undefined when the peek cannot open, so the cells neither act nor offer a
+  // pointer cursor — same gate on the affordance as on the action.
+  const onExperimentCellClick = canUsePeek
+    ? openClickedExperimentPeek
+    : undefined;
+
   const { experimentNames } = useExperimentNames({ projectId });
   const selectedExperimentNames = useMemo(() => {
     return experimentNames.filter((exp) =>
@@ -511,13 +623,13 @@ export default function ExperimentItemsTable({
     limit: "pageSize",
   });
 
-  // Medium by default: with the ids out of the cell a row no longer needs the
-  // tallest option to show its output, and two rows per screen was the
-  // complaint. Large stays one click away for reading long outputs.
-  const [rowHeight, setRowHeight] = useRowHeightLocalStorage(
-    "experiment-items",
-    "m",
-  );
+  const {
+    preset: rowHeight,
+    activeHeightPx,
+    setPreset: setRowHeight,
+    setCustomPx,
+    ...adjustableRowHeight
+  } = useAdjustableRowHeight("experiment-items-compact", "s");
   const ioSingleLine = ioRenderMode === "text";
 
   const [orderByState, setOrderByState] = useOrderByState({
@@ -528,148 +640,69 @@ export default function ExperimentItemsTable({
   // Fetch score filter options scoped to selected experiments
   const {
     filterOptions: scoreFilterOptions,
-    scoreColumns: scoreColumnDefs,
+    scoreColumns: serverScoreColumnDefs,
     isLoading: isFilterOptionsLoading,
+    error: filterOptionsError,
+    retry: retryFilterOptions,
   } = useExperimentItemsFilterOptions({
     projectId,
     experimentIds: allExperimentIds,
   });
 
+  const sidebarScoreOptions =
+    isFilterOptionsLoading || filterOptionsError
+      ? undefined
+      : scoreFilterOptions;
+  const searchRegistry = useExperimentItemsSearchRegistry({
+    baselineId,
+    experimentIds: allExperimentIds,
+    selectedExperiments: selectedExperimentNames,
+    colorExperimentIds,
+    optionsError:
+      filterOptionsError ??
+      (isFilterOptionsLoading
+        ? "Score options are still loading. Try again when they have loaded."
+        : null),
+  });
+
   // Use sidebar filter state for the sidebar UI (provides proper facets, options, etc.)
   // This is the single source of truth for filters
   const capture = usePostHogClientCapture();
+  const { viewControllersRef, onExplicitFilterStateChange } =
+    useTableViewFilterChange();
   const queryFilter = useSidebarFilterState(
     experimentItemsFilterConfig,
     scoreFilterOptions,
     {
       stateLocation: "url",
+      onExplicitFilterStateChange,
       loading: isFilterOptionsLoading,
       // v4-only surface — drives `isV4` on filters:* analytics.
       isV4: true,
     },
   );
 
-  // Create ref-based wrapper to avoid stale closure when queryFilter updates
-  const queryFilterRef = useRef(queryFilter);
-  queryFilterRef.current = queryFilter;
-
-  const setFiltersWrapper = useCallback(
-    (filters: FilterState) => queryFilterRef.current?.setFilterState(filters),
-    [],
+  const groupedFilters = groupExperimentFilters(
+    queryFilter.filterState,
+    baselineId,
+    allExperimentIds,
   );
+  const filtersByExperiment = groupedFilters.groups;
 
-  // Per-experiment filter targeting state (maps filter index to experiment ID)
-  // Default: all filters target the baseline experiment
-  const [filterTargets, setFilterTargets] = useState<Record<number, string>>(
-    {},
-  );
-
-  // Build filter list for pills display
-  // Group filters by their target experiment (defaults to baseline)
-  const filtersByExperiment = useMemo(() => {
-    const filterState = queryFilter.filterState;
-    if (filterState.length === 0) return [];
-    if (!defaultFilterTargetExperimentId) return [];
-
-    // Group filters by target experiment
-    const grouped: Record<string, FilterState> = {};
-    filterState.forEach((filter, index) => {
-      const targetExp = filterTargets[index] ?? defaultFilterTargetExperimentId;
-      if (!grouped[targetExp]) {
-        grouped[targetExp] = [];
-      }
-      grouped[targetExp].push(filter);
-    });
-
-    // Convert to array format expected by ExperimentFilterPills
-    return Object.entries(grouped).map(([runId, filters]) => ({
-      runId,
-      filters,
-    }));
-  }, [queryFilter.filterState, filterTargets, defaultFilterTargetExperimentId]);
-
-  // Handler for changing filter target experiment
-  const handleFilterTargetChange = useCallback(
-    (
-      _fromExperimentId: string,
-      toExperimentId: string,
-      _filter: FilterCondition,
-      filterIndex: number,
-    ) => {
-      // Find the original filter index in queryFilter.filterState
-      // We need to map from the grouped index back to the original index
-      const filterState = queryFilterRef.current.filterState;
-
-      // Count filters up to the current group to find original index
-      let originalIndex = 0;
-      let currentGroupIndex = 0;
-
-      for (let i = 0; i < filterState.length; i++) {
-        const target = filterTargets[i] ?? defaultFilterTargetExperimentId;
-        if (target === _fromExperimentId) {
-          if (currentGroupIndex === filterIndex) {
-            originalIndex = i;
-            break;
-          }
-          currentGroupIndex++;
-        }
-      }
-
-      // Update the target for this filter
-      setFilterTargets((prev) => ({
-        ...prev,
-        [originalIndex]: toExperimentId,
-      }));
-    },
-    [filterTargets, defaultFilterTargetExperimentId],
-  );
-
-  // Handler for removing a filter via pill
-  const handleFilterRemove = useCallback(
-    (experimentIdToRemoveFrom: string, filterIndex: number) => {
-      const filterState = queryFilterRef.current.filterState;
-
-      // Find the original filter index
-      let originalIndex = 0;
-      let currentGroupIndex = 0;
-
-      for (let i = 0; i < filterState.length; i++) {
-        const target = filterTargets[i] ?? defaultFilterTargetExperimentId;
-        if (target === experimentIdToRemoveFrom) {
-          if (currentGroupIndex === filterIndex) {
-            originalIndex = i;
-            break;
-          }
-          currentGroupIndex++;
-        }
-      }
-
-      // Remove the filter from queryFilter
-      const newFilters = filterState.filter((_, idx) => idx !== originalIndex);
-      queryFilterRef.current.setFilterState(newFilters);
-
-      // Clean up the filter targets (shift indices down)
-      setFilterTargets((prev) => {
-        const newTargets: Record<number, string> = {};
-        Object.entries(prev).forEach(([key, value]) => {
-          const idx = parseInt(key);
-          if (idx < originalIndex) {
-            newTargets[idx] = value;
-          } else if (idx > originalIndex) {
-            newTargets[idx - 1] = value;
-          }
-          // Skip the removed index
-        });
-        return newTargets;
-      });
-    },
-    [filterTargets, defaultFilterTargetExperimentId],
+  // A compact row stays on the short preview. Medium, Large, and a dragged
+  // height at or above this layout's Medium preset ask for the expanded read.
+  const ioCharLimit = getRowHeightIOCharLimit(
+    rowHeight,
+    adjustableRowHeight.mode,
+    activeHeightPx,
+    layout === "grid" ? GRID_VIEW_ROW_HEIGHTS : LIST_VIEW_ROW_HEIGHTS,
   );
 
   // Use the custom hook for experiment items data fetching
-  const { items, totalCount, dataUpdatedAt, ioLoading } =
+  const { items, totalCount, dataUpdatedAt, ioLoading, isTotalCountLoading } =
     useExperimentItemsTableData({
       projectId,
+      filtersValid: !groupedFilters.error,
       baseExperimentId: baselineId,
       compExperimentIds: comparisonIds,
       filterByExperiment: filtersByExperiment.map((filter) => ({
@@ -682,10 +715,14 @@ export default function ExperimentItemsTable({
         limit: paginationState.pageSize,
       },
       itemVisibility,
+      ioCharLimit,
     });
 
+  const { rows: scoreRows, scoreColumns: scoreColumnDefs } =
+    useExperimentItemsScoreCache(items.rows, serverScoreColumnDefs);
+
   // Running items without an expected output is common, so don't spend a column
-  // on it when nothing has one. Kept while IO loads so it doesn't flash.
+  // on it before loaded IO confirms there is expected output to display.
   //
   // Whether the column exists is a property of the runs being compared, not of
   // the page that happens to be loaded, so a page of items that all lack an
@@ -709,16 +746,11 @@ export default function ExperimentItemsTable({
     () => (experimentSelectionKey ? experimentSelectionKey.split(",") : []),
     [experimentSelectionKey],
   );
-  const [expectedOutputSeenFor, setExpectedOutputSeenFor] = useState<
-    string | null
-  >(null);
-  useEffect(() => {
-    if (expectedOutputOnPage) setExpectedOutputSeenFor(experimentSelectionKey);
-  }, [expectedOutputOnPage, experimentSelectionKey]);
-  const showExpectedOutput =
-    ioLoading ||
-    expectedOutputOnPage ||
-    expectedOutputSeenFor === experimentSelectionKey;
+  const showExpectedOutput = useExpectedOutputVisibility(
+    experimentSelectionKey,
+    expectedOutputOnPage,
+    ioLoading,
+  );
 
   const { selectActionColumn } = TableSelectionManager<ExperimentItemsTableRow>(
     {
@@ -729,17 +761,12 @@ export default function ExperimentItemsTable({
     },
   );
 
-  const colorExperimentIds = useMemo(
-    () => (hasBaseline ? allExperimentIds : []),
-    [hasBaseline, allExperimentIds],
-  );
-
   // A score column that is empty for every item in view is noise, so only keep
   // the keys the items query actually returned. Undefined while items load, so
   // columns don't disappear and come back on each fetch.
   const presentScoreKeys = useMemo(() => {
     if (items.status !== "success") return undefined;
-    const experimentsInView = (items.rows ?? []).flatMap(
+    const experimentsInView = (scoreRows ?? []).flatMap(
       (row) => row.experiments,
     );
     return {
@@ -750,10 +777,9 @@ export default function ExperimentItemsTable({
         experimentsInView.map((exp) => exp.traceScores),
       ),
     };
-  }, [items]);
+  }, [items.status, scoreRows]);
 
-  // Create score columns from the shared filter options data
-  // This ensures sidebar filters and column visibility use the same data source
+  // Column visibility and both table layouts share the cache-inclusive score columns.
   const observationScoreColumns = useMemo(
     () =>
       createScoreColumns<ExperimentItemData>({
@@ -919,7 +945,7 @@ export default function ExperimentItemsTable({
   );
 
   const scoreColumnSummaries = useMemo(() => {
-    const rowsInView = items.rows ?? [];
+    const rowsInView = scoreRows ?? [];
     return {
       observationScores: buildScoreColumnSummaries({
         rows: rowsInView,
@@ -937,7 +963,7 @@ export default function ExperimentItemsTable({
       }),
     };
   }, [
-    items.rows,
+    scoreRows,
     scoreDataTypesByKey,
     primaryExperimentId,
     primaryComparisonId,
@@ -970,6 +996,13 @@ export default function ExperimentItemsTable({
 
         return {
           ...scoreCol,
+          defaultHidden: false,
+          // The header holds this column's analysis, so it also sets the
+          // column's floor: the shared table's default lets a column be dragged
+          // to 20px, which is narrower than `−0.12 ↗1 ↘14` and would clip a
+          // count into a different, wrong number. 120px holds the delta and the
+          // movement counts whole.
+          minSize: 120,
           // The header carries the column's aggregate over the items in view, and
           // the movement against the comparison. Keeps the plain name for the
           // column picker.
@@ -1043,12 +1076,13 @@ export default function ExperimentItemsTable({
                 experiments={experiments}
                 allExperimentIds={allExperimentIds}
                 colorExperimentIds={colorExperimentIds}
+                row={row.original}
+                onExperimentClick={onExperimentCellClick}
                 renderValue={(exp) => {
                   const scoresData = exp[scoreField] ?? {};
                   const value = scoresData[scoreKey];
 
-                  if (!value)
-                    return <span className="text-muted-foreground">-</span>;
+                  if (!value) return <EmptyValue />;
 
                   const mockRow = {
                     getValue: (key: string) =>
@@ -1106,6 +1140,7 @@ export default function ExperimentItemsTable({
                       </span>
                       {diff && (
                         <DiffLabel
+                          variant="ghost"
                           diff={diff}
                           formatValue={(v) => v.toFixed(2)}
                           title={diffTitle}
@@ -1134,6 +1169,7 @@ export default function ExperimentItemsTable({
       removeScoreComparisonFilter,
       captureScoreComparisonFilter,
       runNameOf,
+      onExperimentCellClick,
     ],
   );
 
@@ -1173,8 +1209,11 @@ export default function ExperimentItemsTable({
     header: "Expected Output",
     size: 300,
     enableHiding: true,
+    defaultHidden: true,
     // An empty expected output used to render as two literal quote characters.
     getCell: (value) => (ioLoading ? { type: "loading" } : value || undefined),
+    // Display chooses text or JSON. Row height does not.
+    followRowHeight: false,
     singleLine: ioSingleLine,
     variant: "output",
   }) as LangfuseColumnDef<ExperimentItemsTableRow>;
@@ -1203,8 +1242,8 @@ export default function ExperimentItemsTable({
     if (!diff) return null;
     return (
       <DiffLabel
+        variant="ghost"
         diff={diff}
-        preferNegativeDiff
         formatValue={format}
         title={describeRunComparison({
           baselineName: runNameOf(baselineId),
@@ -1218,18 +1257,14 @@ export default function ExperimentItemsTable({
 
   const columns: LangfuseColumnDef<ExperimentItemsTableRow>[] = [
     ...(hideControls ? [] : [selectActionColumn]),
-    createIdTableColumn<ExperimentItemsTableRow>({
-      accessorKey: "itemId",
-      header: "Item ID",
-      size: 150,
-      enableHiding: true,
-    }),
     createIOTableColumn<ExperimentItemsTableRow>({
       accessorKey: "input",
       header: "Input",
       size: 300,
       enableHiding: true,
       getCell: (value) => (ioLoading ? { type: "loading" } : (value ?? null)),
+      // Display chooses text or JSON. Row height does not.
+      followRowHeight: false,
       singleLine: ioSingleLine,
     }),
     // The scores sit between the item's input and its outputs: the input says
@@ -1268,6 +1303,7 @@ export default function ExperimentItemsTable({
       header: "Output",
       size: 300,
       enableHiding: true,
+      defaultHidden: true,
       cell: ({ row }) => {
         const outputs = row.original.outputs ?? [];
         return (
@@ -1275,6 +1311,8 @@ export default function ExperimentItemsTable({
             outputs={outputs}
             allExperimentIds={allExperimentIds}
             colorExperimentIds={colorExperimentIds}
+            row={row.original}
+            onExperimentClick={onExperimentCellClick}
             singleLine={ioSingleLine}
             isLoading={ioLoading}
             // Items with no expected output get no expected line and no
@@ -1288,8 +1326,7 @@ export default function ExperimentItemsTable({
         );
       },
     },
-    // Cost and latency read as measurements, the ids as lookups — both
-    // sit behind the score columns so the analysis is above the fold.
+    // Measurements sit behind the scores so the analysis is above the fold.
     {
       accessorKey: "totalCost",
       id: "totalCost",
@@ -1300,6 +1337,7 @@ export default function ExperimentItemsTable({
         ),
       size: 120,
       enableHiding: true,
+      defaultHidden: true,
       cell: ({ row }) => {
         const experiments = row.original.experiments;
         const baselineCost = baselineExperimentOf(experiments)?.totalCost;
@@ -1308,6 +1346,8 @@ export default function ExperimentItemsTable({
             experiments={experiments}
             allExperimentIds={allExperimentIds}
             colorExperimentIds={colorExperimentIds}
+            row={row.original}
+            onExperimentClick={onExperimentCellClick}
             renderValue={(exp) => (
               // Wraps rather than clipping: in a 120px column a six-decimal
               // cost and its delta do not fit on one line, and half a currency
@@ -1341,6 +1381,7 @@ export default function ExperimentItemsTable({
         ),
       size: 120,
       enableHiding: true,
+      defaultHidden: true,
       cell: ({ row }) => {
         const experiments = row.original.experiments;
         const baselineLatency = baselineExperimentOf(experiments)?.latencyMs;
@@ -1349,6 +1390,8 @@ export default function ExperimentItemsTable({
             experiments={experiments}
             allExperimentIds={allExperimentIds}
             colorExperimentIds={colorExperimentIds}
+            row={row.original}
+            onExperimentClick={onExperimentCellClick}
             renderValue={(exp) => (
               <span className="inline-flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5">
                 {exp.latencyMs != null ? (
@@ -1365,25 +1408,6 @@ export default function ExperimentItemsTable({
                 })}
               </span>
             )}
-          />
-        );
-      },
-    },
-    {
-      accessorKey: "observationId",
-      id: "observationId",
-      headerLabel: "Observation ID",
-      header: () => renderExperimentSpecificHeader("Observation ID"),
-      size: 180,
-      enableHiding: true,
-      cell: ({ row }) => {
-        const experiments = row.original.experiments;
-        return (
-          <StackedExperimentCell
-            experiments={experiments}
-            allExperimentIds={allExperimentIds}
-            colorExperimentIds={colorExperimentIds}
-            renderValue={(exp) => <IdTableCell value={exp.observationId} />}
           />
         );
       },
@@ -1407,6 +1431,8 @@ export default function ExperimentItemsTable({
             experiments={experiments}
             allExperimentIds={allExperimentIds}
             colorExperimentIds={colorExperimentIds}
+            row={row.original}
+            onExperimentClick={onExperimentCellClick}
             renderValue={(exp) => {
               const preparedDate = buildLocalIsoDatePresentation({
                 date: exp.startTime,
@@ -1436,6 +1462,8 @@ export default function ExperimentItemsTable({
             experiments={experiments}
             allExperimentIds={allExperimentIds}
             colorExperimentIds={colorExperimentIds}
+            row={row.original}
+            onExperimentClick={onExperimentCellClick}
             renderValue={(exp) => <span>{exp.level}</span>}
           />
         );
@@ -1447,7 +1475,7 @@ export default function ExperimentItemsTable({
       headerLabel: "Experiment",
       header: () => renderExperimentSpecificHeader("Experiment"),
       size: 150,
-      defaultHidden: true,
+      defaultHidden: false,
       enableHiding: true,
       cell: ({ row }) => {
         const experiments = row.original.experiments;
@@ -1456,6 +1484,8 @@ export default function ExperimentItemsTable({
             experiments={experiments}
             allExperimentIds={allExperimentIds}
             colorExperimentIds={colorExperimentIds}
+            row={row.original}
+            onExperimentClick={onExperimentCellClick}
             renderValue={(exp) => {
               const expOption = selectedExperimentNames.find(
                 (e) => e.experimentId === exp.experimentId,
@@ -1474,38 +1504,11 @@ export default function ExperimentItemsTable({
     },
   ];
 
-  const scoreColumnIds = useMemo(
-    () =>
-      [...observationScoreColumns, ...traceScoreColumns].map(
-        (column) => column.accessorKey,
-      ),
-    [observationScoreColumns, traceScoreColumns],
-  );
-
-  // Score columns are now visible by default. A returning user has `false`
-  // persisted for every one of them from the previous default, so this one-time
-  // migration reaches them too — see `revealScoreColumns` for how a user who
-  // picked their own score columns is left alone. It is consumed once and for
-  // good, so it waits for the score columns to be known rather than running
-  // against an empty or half-loaded set.
-  const columnVisibilityMigrations = useMemo(
-    () => [
-      {
-        versionKey: `experimentItemsColumnVisibility-scoresVisible-v1-${projectId}`,
-        apply: (visibility: VisibilityState) =>
-          isFilterOptionsLoading
-            ? null
-            : revealScoreColumns(visibility, scoreColumnIds),
-      },
-    ],
-    [projectId, scoreColumnIds, isFilterOptionsLoading],
-  );
-
   const [columnVisibility, setColumnVisibilityState] =
     useColumnVisibility<ExperimentItemsTableRow>(
-      `experimentItemsColumnVisibility-${projectId}`,
+      `experimentItemsColumnVisibility-compare-v2-${projectId}`,
+
       columns,
-      columnVisibilityMigrations,
     );
 
   // the score columns moved ahead of the metrics and ids so their
@@ -1515,7 +1518,7 @@ export default function ExperimentItemsTable({
   const columnOrderMigrations = useMemo(
     () => [
       {
-        versionKey: `experimentItemsColumnOrder-scoresEarlier-v2-${projectId}`,
+        versionKey: `experimentItemsColumnOrder-compare-${projectId}`,
         apply: resetStaleDefaultColumnOrder,
       },
     ],
@@ -1588,20 +1591,28 @@ export default function ExperimentItemsTable({
       "timestamp",
       "traceId",
       "peekExperimentId",
+      "annotation",
+      "comments",
+      "commentObjectType",
+      "commentObjectId",
     ],
     tableName: experimentItemsFilterConfig.tableName,
     isV4: true,
-    extractParamsValuesFromRow: (row: ExperimentItemsTableRow) => {
-      // Use the explicit baseline when present. Without one, use the first
-      // selected experiment only as the primary trace for URL-compatible peek
-      // navigation; it is not treated as a baseline in comparison logic.
-      const baselineExp = baselineId
-        ? row.experiments.find((e) => e.experimentId === baselineId)
-        : row.experiments[0];
+    extractParamsValuesFromRow: (row: ClickedExperimentRow) => {
+      const targetExp = resolveExperimentPeekTarget({
+        experiments: row.experiments,
+        baselineId,
+        clickedExperimentId: row.clickedExperimentId,
+      });
       return {
-        traceId: baselineExp?.traceId || "",
-        timestamp: baselineExp?.startTime.toISOString() || "",
-        observation: baselineExp?.observationId || "",
+        traceId: targetExp?.traceId || "",
+        timestamp: targetExp?.startTime.toISOString() || "",
+        observation: targetExp?.observationId || "",
+        // Tells the peek which experiment it opened on, so its prev/next
+        // switcher starts from the clicked run rather than the baseline.
+        ...(row.clickedExperimentId
+          ? { peekExperimentId: row.clickedExperimentId }
+          : {}),
       };
     },
     expandConfig: {
@@ -1610,12 +1621,16 @@ export default function ExperimentItemsTable({
     },
   });
 
+  // Hand the per-experiment cell handlers above the live `openPeek`.
+  openPeekRef.current = peekNavigationProps.openPeek;
+
   const { isLoading: isViewLoading, ...viewControllers } = useTableViewManager({
     tableName: TableViewPresetTableName.ExperimentItems,
     projectId,
     stateUpdaters: {
       setOrderBy: setOrderByState,
-      setFilters: setFiltersWrapper,
+      setFilters: (filters) =>
+        queryFilter.setFilterState(filters, { origin: "saved_view" }),
       setExpandedFilters: queryFilter.onExpandedChange,
       setColumnOrder: setColumnOrder,
       setColumnVisibility: setColumnVisibilityState,
@@ -1631,24 +1646,60 @@ export default function ExperimentItemsTable({
     currentExpandedFilters: queryFilter.expanded,
   });
 
+  viewControllersRef.current = viewControllers;
+  const handleColumnOrderChange: typeof setColumnOrder = (next) => {
+    const value = typeof next === "function" ? next(columnOrder) : next;
+    viewControllers.handleUserStateChange(columnOrder, value);
+    setColumnOrder(value);
+  };
+  const handleColumnVisibilityChange: typeof setColumnVisibilityState = (
+    next,
+  ) => {
+    const value = typeof next === "function" ? next(columnVisibility) : next;
+    viewControllers.handleUserStateChange(columnVisibility, value);
+    setColumnVisibilityState(value);
+  };
+  const handleOrderByChange: typeof setOrderByState = (next) => {
+    viewControllers.handleUserStateChange(orderByState, next);
+    setOrderByState(next);
+  };
   const peekConfig: DataTablePeekViewProps | undefined = useMemo(() => {
     if (!canUsePeek) return undefined;
     return {
       itemType: "TRACE",
       detailNavigationKey: "experiment-items",
       ...peekNavigationProps,
+      resolveDetailNavigationPath: (entry) =>
+        peekNavigationProps.resolveDetailNavigationPath({
+          ...entry,
+          params: {
+            ...entry.params,
+            ...(router.query.annotation === "open"
+              ? { annotation: "open" }
+              : {}),
+            ...(router.query.annotation !== "open" &&
+            router.query.comments === "open"
+              ? { comments: "open" }
+              : {}),
+          },
+        }),
     };
-  }, [peekNavigationProps, canUsePeek]);
+  }, [
+    peekNavigationProps,
+    canUsePeek,
+    router.query.annotation,
+    router.query.comments,
+  ]);
 
-  // The page as fetched. The score column header aggregates — and the score
-  // matrix, which reads the same ones — deliberately describe this whole page,
+  // The fetched page with local score writes. The column header aggregates and
+  // the score matrix deliberately describe this whole page,
   // so the movement a comparison filter was built from stays readable while
   // that filter is applied.
   const unfilteredRows: ExperimentItemsTableRow[] = useMemo(() => {
-    if (items.status !== "success" || !items.rows) return [];
+    if (items.status !== "success" || !scoreRows) return [];
     // Add 'id' field for DataTable row identification (peek view requires it)
-    return items.rows.map((row) => ({ ...row, id: row.itemId }));
-  }, [items]);
+    return scoreRows.map((row) => ({ ...row, id: row.itemId }));
+  }, [items.status, scoreRows]);
 
   // The score comparison filters narrow the page here rather than in the
   // query — see `useScoreComparisonFilters` for why.
@@ -1678,9 +1729,12 @@ export default function ExperimentItemsTable({
       setDetailPageList(
         "experiment-items",
         rows.map((item: ExperimentItemsTableRow) => {
-          const baselineExp = baselineId
-            ? item.experiments.find((e) => e.experimentId === baselineId)
-            : item.experiments[0];
+          // The list's own default target, same rule the peek uses for a row
+          // click. A cell click overrides it via `clickedExperimentId`.
+          const baselineExp = resolveExperimentPeekTarget({
+            experiments: item.experiments,
+            baselineId,
+          });
 
           // Build experiment targets map for all experiments
           const experimentTargets = Object.fromEntries(
@@ -1747,10 +1801,13 @@ export default function ExperimentItemsTable({
   const pagination = useMemo(
     () => ({
       totalCount: totalCount ?? null,
+      // Without this the footer prints "of 1" for as long as the count query
+      // is in flight behind rows that are already on screen.
+      isTotalCountLoading,
       onChange: setPaginationState,
       state: paginationState,
     }),
-    [paginationState, setPaginationState, totalCount],
+    [isTotalCountLoading, paginationState, setPaginationState, totalCount],
   );
 
   // Compute selected observation IDs for batch evaluation
@@ -1789,11 +1846,24 @@ export default function ExperimentItemsTable({
     ).length;
   }, [selectedRows, rows]);
 
+  const batchEvaluationFilters = useMemo(
+    () =>
+      getExperimentBatchEvaluationFilters(
+        filtersByExperiment,
+        allExperimentIds,
+        selectAll,
+      ),
+    [filtersByExperiment, allExperimentIds, selectAll],
+  );
+  const isBatchEvaluationDisabled =
+    Boolean(groupedFilters.error) ||
+    (selectAll && batchEvaluationFilters === null);
+
   // Build query for batch actions (includes experiment context filter and root span filter)
   const batchActionQuery = useMemo(
     () => ({
       filter: [
-        ...filtersByExperiment.flatMap((f) => f.filters),
+        ...(batchEvaluationFilters ?? []),
         // Include experiment context filter
         ...(allExperimentIds.length > 0
           ? [
@@ -1815,7 +1885,7 @@ export default function ExperimentItemsTable({
       ],
       orderBy: orderByState,
     }),
-    [filtersByExperiment, orderByState, allExperimentIds],
+    [batchEvaluationFilters, orderByState, allExperimentIds],
   );
 
   const handleColumnGroupToggle = useCallback(
@@ -1839,7 +1909,11 @@ export default function ExperimentItemsTable({
           type: BatchActionType.Create,
           label: "Evaluate",
           description: "Run evaluators on selected items",
-          icon: <LightbulbIcon className="h-4 w-4 sm:mr-2" />,
+          disabled: isBatchEvaluationDisabled,
+          disabledReason: groupedFilters.error
+            ? "Fix unavailable filter targets before evaluating items."
+            : "Select individual rows to evaluate when experiments have different filters.",
+          icon: <LightbulbIcon size="base" __rawClassName="sm:mr-2" />,
           customDialog: true,
           accessCheck: {
             scope: "evaluationRule:CUD",
@@ -1853,92 +1927,143 @@ export default function ExperimentItemsTable({
       tableName={experimentItemsFilterConfig.tableName}
     >
       <div className="flex h-full w-full flex-col">
-        {/* Toolbar spanning full width */}
-        {!hideControls && (
-          <DataTableToolbar
-            columns={columns}
-            filterState={queryFilter.filterState}
-            viewConfig={{
-              tableName: TableViewPresetTableName.ExperimentItems,
-              projectId,
-              controllers: viewControllers,
-            }}
-            tableName={experimentItemsFilterConfig.tableName}
-            isV4={true}
-            onColumnGroupToggle={handleColumnGroupToggle}
-            columnsWithCustomSelect={["datasetItemId"]}
-            columnVisibility={columnVisibility}
-            setColumnVisibility={setColumnVisibilityState}
-            columnOrder={columnOrder}
-            setColumnOrder={setColumnOrder}
-            orderByState={orderByState}
-            rowHeight={rowHeight}
-            setRowHeight={setRowHeight}
-            multiSelect={{
-              selectAll,
-              setSelectAll,
-              selectedRowIds:
-                Object.keys(selectedRows).filter((itemId) =>
-                  items.rows
-                    ?.map((item: ExperimentItemsTableRow) => item.itemId)
-                    .includes(itemId),
-                ) ?? [],
-              setRowSelection: setSelectedRows,
-              totalCount,
-              pageSize: paginationState.pageSize,
-              pageIndex: paginationState.pageIndex,
-            }}
-            actionButtons={
-              (selectAll || selectedItemCount > 0) && tableActions.length > 0
-                ? [
-                    <TableActionMenu
-                      key="experiment-items-multi-select-actions"
-                      projectId={projectId}
-                      actions={tableActions}
-                      tableName={BatchExportTableName.Sessions}
-                      selectedCount={selectAll ? totalCount : selectedItemCount}
-                      onClearSelection={() => {
-                        setSelectedRows({});
-                        setSelectAll(false);
-                      }}
-                      onCustomAction={(actionId) => {
-                        if (actionId === ActionId.ObservationBatchEvaluation) {
-                          setShowRunEvaluationDialog(true);
-                        }
-                      }}
-                    />,
-                  ]
-                : undefined
-            }
-          />
-        )}
+        <SearchableTableFilterLayout
+          search={
+            hideControls ? null : (
+              <TableSearchBar
+                size="large"
+                key={`${projectId}:${viewControllers.filterEditorResetKey}:${queryFilter.draftResetKey}`}
+                projectId={projectId}
+                tableName="experiment-items"
+                registry={searchRegistry}
+                filterState={queryFilter.searchBarFilterState}
+                setFilterState={queryFilter.setFilterState}
+                observed={toObservedOptions(
+                  scoreFilterOptions,
+                  isFilterOptionsLoading,
+                )}
+                isV4={true}
+              />
+            )
+          }
+          toolbar={
+            <>
+              {!hideControls && (
+                <DataTableToolbar
+                  columns={columns}
+                  filterState={queryFilter.filterState}
+                  viewConfig={{
+                    tableName: TableViewPresetTableName.ExperimentItems,
+                    projectId,
+                    controllers: viewControllers,
+                  }}
+                  tableName={experimentItemsFilterConfig.tableName}
+                  isV4={true}
+                  onColumnGroupToggle={handleColumnGroupToggle}
+                  columnsWithCustomSelect={["datasetItemId"]}
+                  columnVisibility={columnVisibility}
+                  setColumnVisibility={handleColumnVisibilityChange}
+                  columnOrder={columnOrder}
+                  setColumnOrder={handleColumnOrderChange}
+                  orderByState={orderByState}
+                  rowHeight={rowHeight}
+                  setRowHeight={setRowHeight}
+                  customRowHeight={customRowHeightMenu(adjustableRowHeight)}
+                  toolbarSettings={toolbarSettings}
+                  multiSelect={{
+                    selectAll,
+                    setSelectAll,
+                    selectedRowIds:
+                      Object.keys(selectedRows).filter((itemId) =>
+                        items.rows
+                          ?.map((item: ExperimentItemsTableRow) => item.itemId)
+                          .includes(itemId),
+                      ) ?? [],
+                    setRowSelection: setSelectedRows,
+                    totalCount,
+                    pageSize: paginationState.pageSize,
+                    pageIndex: paginationState.pageIndex,
+                  }}
+                  actionButtons={
+                    (selectAll || selectedItemCount > 0) &&
+                    tableActions.length > 0
+                      ? [
+                          <TableActionMenu
+                            key="experiment-items-multi-select-actions"
+                            projectId={projectId}
+                            actions={tableActions}
+                            tableName={BatchExportTableName.Sessions}
+                            selectedCount={
+                              selectAll ? totalCount : selectedItemCount
+                            }
+                            onClearSelection={() => {
+                              setSelectedRows({});
+                              setSelectAll(false);
+                            }}
+                            onCustomAction={(actionId) => {
+                              if (
+                                actionId ===
+                                  ActionId.ObservationBatchEvaluation &&
+                                !isBatchEvaluationDisabled
+                              ) {
+                                setShowRunEvaluationDialog(true);
+                              }
+                            }}
+                          />,
+                        ]
+                      : undefined
+                  }
+                />
+              )}
 
-        {/* Score comparison filters — evaluated over the loaded page */}
-        {scoreComparisonPills.length > 0 && (
-          <ScoreComparisonFilterPills
-            pills={scoreComparisonPills}
-            onRemove={removeScoreComparisonFilter}
-          />
-        )}
+              {/* Score comparison filters — evaluated over the loaded page */}
+              {scoreComparisonPills.length > 0 && (
+                <ScoreComparisonFilterPills
+                  pills={scoreComparisonPills}
+                  onRemove={removeScoreComparisonFilter}
+                />
+              )}
 
-        {/* Filter Pills with Experiment Targeting */}
-        {filtersByExperiment.length > 0 && (
-          <ExperimentFilterPills
-            selectedExperimentNames={selectedExperimentNames}
-            filtersByExperiment={filtersByExperiment}
-            onFilterTargetChange={handleFilterTargetChange}
-            onFilterRemove={handleFilterRemove}
-            className="border-b"
-          />
-        )}
-
-        {/* Content area with sidebar and table */}
-        <ResizableFilterLayout>
+              {groupedFilters.error && (
+                <p role="alert" className="text-destructive px-2 py-2 text-sm">
+                  {groupedFilters.error}
+                </p>
+              )}
+              {filterOptionsError && (
+                <div
+                  role="alert"
+                  className="flex items-center gap-2 px-2 py-2 text-sm"
+                >
+                  <span className="text-destructive">{filterOptionsError}</span>
+                  <Button
+                    text="Retry filter options"
+                    variant="secondary"
+                    size="sm"
+                    onClick={retryFilterOptions}
+                  />
+                </div>
+              )}
+            </>
+          }
+        >
           {!hideControls && (
-            <DataTableControls
-              // Remount the sidebar when the saved view changes so the new view's filters replace any stale draft UI state.
-              key={viewControllers.selectedViewId ?? "no-view"}
-              queryFilter={queryFilter}
+            <ExperimentFilterSidebar
+              key={`${viewControllers.filterEditorResetKey}:${queryFilter.draftResetKey}`}
+              filters={queryFilter.filterState}
+              onChange={queryFilter.setFilterState}
+              onClearAll={queryFilter.clearAll}
+              targets={(searchRegistry.targeting?.targets ?? []).map(
+                (target) => ({
+                  ...target,
+                  label: target.displayLabel ?? target.label,
+                }),
+              )}
+              options={sidebarScoreOptions}
+              legacyDefaultTarget={
+                searchRegistry.targeting?.legacyDefaultTarget ?? "baseline"
+              }
+              optionsError={filterOptionsError}
+              onRetryOptions={retryFilterOptions}
             />
           )}
 
@@ -1949,6 +2074,7 @@ export default function ExperimentItemsTable({
                   rows={unfilteredRows}
                   scoreRows={matrixScoreRows}
                   experiments={matrixExperiments}
+                  colorExperimentIds={colorExperimentIds}
                   isLoading={items.status === "loading" || isViewLoading}
                   pagination={pagination}
                 />
@@ -1972,7 +2098,13 @@ export default function ExperimentItemsTable({
                   singleLine={ioSingleLine}
                   rows={rows}
                   isLoading={items.status === "loading" || isViewLoading}
+                  ioLoading={ioLoading}
                   rowHeight={rowHeight}
+                  customRowHeightPx={activeHeightPx}
+                  onCustomRowHeightChange={
+                    hideControls ? undefined : setCustomPx
+                  }
+                  onSelectRowHeight={hideControls ? undefined : setRowHeight}
                   showExpectedOutput={showExpectedOutput}
                   pagination={pagination}
                   observationScoreOrder={observationScoreOrder}
@@ -2011,13 +2143,16 @@ export default function ExperimentItemsTable({
                 pagination={pagination}
                 rowSelection={selectedRows}
                 setRowSelection={setSelectedRows}
-                setOrderBy={setOrderByState}
+                setOrderBy={handleOrderByChange}
                 orderBy={orderByState}
                 columnOrder={columnOrder}
-                onColumnOrderChange={setColumnOrder}
+                onColumnOrderChange={handleColumnOrderChange}
                 columnVisibility={columnVisibility}
-                onColumnVisibilityChange={setColumnVisibilityState}
+                onColumnVisibilityChange={handleColumnVisibilityChange}
                 rowHeight={rowHeight}
+                customRowHeightPx={activeHeightPx}
+                onCustomRowHeightChange={hideControls ? undefined : setCustomPx}
+                onSelectRowHeight={hideControls ? undefined : setRowHeight}
                 peekView={peekConfig}
                 noResultsMessage={
                   !hasSelectedRuns ? (
@@ -2034,7 +2169,7 @@ export default function ExperimentItemsTable({
               />
             )}
           </div>
-        </ResizableFilterLayout>
+        </SearchableTableFilterLayout>
 
         {/* Peek view panel */}
         {peekConfig && (
@@ -2045,7 +2180,7 @@ export default function ExperimentItemsTable({
         )}
 
         {/* Run Evaluation Dialog */}
-        {showRunEvaluationDialog && (
+        {showRunEvaluationDialog && !isBatchEvaluationDisabled && (
           <RunEvaluationDialog
             projectId={projectId}
             selectedObservationIds={selectedObservationIds}
@@ -2058,6 +2193,8 @@ export default function ExperimentItemsTable({
             }
             onClose={() => {
               setShowRunEvaluationDialog(false);
+            }}
+            onSuccess={() => {
               setSelectedRows({});
               setSelectAll(false);
             }}

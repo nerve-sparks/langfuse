@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary, @typescript-eslint/no-use-before-define */
 import {
   commandClickhouse,
   parseClickhouseUTCDateTimeFormat,
@@ -59,7 +60,10 @@ import {
 } from "../../domain/observation-field-groups";
 import { recordDistribution } from "../instrumentation";
 import { DEFAULT_RENDERING_PROPS, RenderingProps } from "../utils/rendering";
-import { shouldSkipObservationsFinal } from "../queries/clickhouse-sql/query-options";
+import {
+  shouldSkipObservationsFinal,
+  shouldSkipScoresDedup,
+} from "../queries/clickhouse-sql/query-options";
 
 /**
  * Checks if observation exists in clickhouse.
@@ -500,7 +504,8 @@ const getObservationByIdInternal = async ({
   FROM observations
   WHERE id = {id: String}
   AND project_id = {projectId: String}
-  ${startTime ? `AND toDate(start_time) = toDate({startTime: DateTime64(3)})` : ""}
+  ${/* Matched at minute resolution: minute is the finest the primary key can prune on, and flooring absorbs sub-minute precision differences in the caller-supplied start time. */ ""}
+  ${startTime ? `AND toStartOfMinute(start_time) = toStartOfMinute({startTime: DateTime64(3)})` : ""}
   ${startTimeLowerBound ? `AND start_time >= {startTimeLowerBound: DateTime64(3)} - ${OBSERVATIONS_TO_TRACE_INTERVAL}` : ""}
   ${type ? `AND type = {type: String}` : ""}
   ${traceId ? `AND trace_id = {traceId: String}` : ""}
@@ -809,7 +814,7 @@ const getObservationsTableInternal = async <T>(
         data_type,
         comment
       FROM
-        scores FINAL
+        scores ${shouldSkipScoresDedup(projectId) ? "" : "FINAL"}
       WHERE ${appliedScoresFilter.query}
       GROUP BY
         trace_id,
@@ -1475,6 +1480,7 @@ export const getObservationMetricsForPrompts = async (
         : {}),
     },
     tags: { projectId },
+    preferredClickhouseService: "ReadOnly",
   });
 
   return rows.map((r) => ({
@@ -1633,10 +1639,12 @@ export const getObservationCountsByProjectInCreationInterval = async ({
   start,
   end,
   projectId,
+  projectIds,
 }: {
   start: Date;
   end: Date;
   projectId?: string;
+  projectIds?: string[];
 }) => {
   const query = `
     SELECT
@@ -1646,6 +1654,7 @@ export const getObservationCountsByProjectInCreationInterval = async ({
     WHERE created_at >= {start: DateTime64(3)}
     AND created_at < {end: DateTime64(3)}
     ${projectId ? "AND project_id = {projectId: String}" : ""}
+    ${projectIds ? "AND project_id IN ({projectIds: Array(String)})" : ""}
     GROUP BY project_id
   `;
 
@@ -1655,6 +1664,7 @@ export const getObservationCountsByProjectInCreationInterval = async ({
       start: convertDateToClickhouseDateTime(start),
       end: convertDateToClickhouseDateTime(end),
       ...(projectId ? { projectId } : {}),
+      ...(projectIds ? { projectIds } : {}),
     },
     clickhouseConfigs: {
       request_timeout: 300000, // 5 minutes timeout
@@ -1887,9 +1897,9 @@ export const getGenerationsForAnalyticsIntegrations = async function* (
       o.id as id,
       o.total_cost as total_cost,
       if(isNull(completion_start_time), NULL, date_diff('millisecond', start_time, completion_start_time)) as time_to_first_token,
-      o.usage_details['total'] as input_tokens,
+      o.usage_details['input'] as input_tokens,
       o.usage_details['output'] as output_tokens,
-      o.cost_details['total'] as total_tokens,
+      o.usage_details['total'] as total_tokens,
       o.project_id as project_id,
       if(isNull(end_time), NULL, date_diff('millisecond', start_time, end_time) / 1000) as latency,
       o.provided_model_name as model,

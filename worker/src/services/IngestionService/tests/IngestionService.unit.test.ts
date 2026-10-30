@@ -77,7 +77,7 @@ describe("IngestionService unit tests", () => {
 
     expect(eventRecord.event_bytes).toBe(rawOtelSpanBytes);
 
-    await ingestionService.writeEventRecord(eventRecord);
+    const acceptedBytes = await ingestionService.writeEventRecord(eventRecord);
 
     expect(addToQueue).toHaveBeenCalledOnce();
     const queuedRecord = addToQueue.mock.calls[0]?.[1];
@@ -89,6 +89,79 @@ describe("IngestionService unit tests", () => {
       Buffer.byteLength(JSON.stringify(eventWithoutSize), "utf8"),
     );
     expect(eventBytes).toBeLessThan(rawOtelSpanBytes);
+    expect(acceptedBytes).toBe(eventBytes);
+  });
+
+  describe("AI gateway attribution", () => {
+    const createGatewayLikeEventRecord = (overrides: {
+      ingestionApiKey: string;
+      metadata?: Record<string, unknown>;
+    }) =>
+      new IngestionService(
+        {} as any,
+        {} as any,
+        { addToQueue: vi.fn() } as any,
+        {} as any,
+      ).createEventRecord(
+        {
+          projectId: "project-id",
+          traceId: "trace-id",
+          spanId: "observation-id",
+          parentSpanId: "",
+          name: "gateway-generation",
+          type: "SPAN",
+          environment: "default",
+          startTimeISO: "2026-07-22T00:00:00.000Z",
+          endTimeISO: "2026-07-22T00:00:01.000Z",
+          metadata: overrides.metadata ?? {
+            "langfuse.gateway.api_key.id": "gateway-key-1",
+          },
+          serviceName: "langfuse-ai-gateway",
+          serviceVersion: "1.2.3",
+          scopeName: "langfuse-ai-gateway",
+          scopeVersion: "0.1.0",
+          ingestionApiKey: overrides.ingestionApiKey,
+          source: "otel",
+        },
+        "raw-event.json",
+      );
+
+    it("attributes a gateway-token upload to the gateway key and its scope-versioned service", async () => {
+      const eventRecord = await createGatewayLikeEventRecord({
+        ingestionApiKey: "gateway:grant-1",
+      });
+
+      expect(eventRecord).toMatchObject({
+        ingestion_api_key: "gateway-key-1",
+        service_name: "langfuse-ai-gateway",
+        service_version: "0.1.0",
+      });
+    });
+
+    it.each([
+      { case: "an SDK key", ingestionApiKey: "pk-lf-spoofing-sdk" },
+      { case: "a replay without an ingestion key", ingestionApiKey: "" },
+    ])(
+      "clears the gateway service claimed by $case and keeps its key",
+      async ({ ingestionApiKey }) => {
+        const eventRecord = await createGatewayLikeEventRecord({
+          ingestionApiKey,
+        });
+
+        expect(eventRecord.ingestion_api_key).toBe(ingestionApiKey);
+        expect(eventRecord.service_name).toBeUndefined();
+        expect(eventRecord.service_version).toBeUndefined();
+      },
+    );
+
+    it("rejects a gateway-token upload without a gateway key id", async () => {
+      await expect(
+        createGatewayLikeEventRecord({
+          ingestionApiKey: "gateway:grant-1",
+          metadata: {},
+        }),
+      ).rejects.toThrow("langfuse.gateway.api_key.id");
+    });
   });
 
   it("overflows only the direct events_full copy and preserves the enriched record", async () => {
@@ -128,7 +201,7 @@ describe("IngestionService unit tests", () => {
       ],
     });
 
-    await ingestionService.writeEventRecord(eventRecord);
+    const acceptedBytes = await ingestionService.writeEventRecord(eventRecord);
 
     expect(mocks.applyObservationFieldOverflow).toHaveBeenCalledWith(
       eventRecord,
@@ -141,6 +214,12 @@ describe("IngestionService unit tests", () => {
       metadata_names: ["keep", "large.nested"],
       metadata_values: ["small", expect.stringContaining("metadata-media")],
     });
+    const { event_bytes: eventBytes, ...eventWithoutSize } =
+      addToQueue.mock.calls[0]![1];
+    expect(acceptedBytes).toBe(eventBytes);
+    expect(acceptedBytes).toBe(
+      Buffer.byteLength(JSON.stringify(eventWithoutSize), "utf8"),
+    );
   });
 
   it("promotes provided usage and cost for model-less direct events", async () => {
@@ -588,6 +667,11 @@ describe("IngestionService unit tests", () => {
       createdAtTimestamp: new Date(timestamp),
       observationEventList,
       writeToStagingTables: false,
+      attribution: {
+        ingestionApiKey: "pk-lf-test",
+        ingestionSdkName: "langfuse-test",
+        ingestionSdkVersion: "0.0.0",
+      },
     });
 
     const observationRecord = addToQueue.mock.calls.find(

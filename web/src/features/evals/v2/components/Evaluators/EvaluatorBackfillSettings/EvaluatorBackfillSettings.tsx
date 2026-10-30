@@ -1,3 +1,4 @@
+/* eslint-disable no-nested-ternary */
 import { format, subMonths } from "date-fns";
 import { Switch } from "@/src/components/design-system/Switch/Switch";
 import { DateRangeInput } from "@/src/features/evals/v2/components/Evaluators/EvaluatorBackfillSettings/components/DateRangeInput/DateRangeInput";
@@ -64,6 +65,7 @@ export function EvaluatorBackfillSettings({
   maxItems,
   maxAllowedItems,
   matchingObservations,
+  sampling,
   isEstimating,
   onEnabledChange,
   onWindowChange,
@@ -77,6 +79,7 @@ export function EvaluatorBackfillSettings({
   maxItems: number;
   maxAllowedItems: number;
   matchingObservations: number;
+  sampling: number;
   isEstimating: boolean;
   onEnabledChange: (enabled: boolean) => void;
   onWindowChange: (window: EvaluatorBackfillWindow) => void;
@@ -84,6 +87,10 @@ export function EvaluatorBackfillSettings({
   onMaxItemsChange: (maxItems: number) => void;
 }) {
   const cappedCount = Math.min(matchingObservations, maxItems);
+  const samplingNote =
+    sampling < 1 && cappedCount > 0
+      ? ` At ${Math.round(sampling * 100)}% sampling, about ${numberFormatter(Math.round(cappedCount * sampling), 0)} will be scored.`
+      : "";
   const rangeDays = Math.max(
     1,
     Math.ceil(
@@ -186,8 +193,8 @@ export function EvaluatorBackfillSettings({
             {isEstimating
               ? "Counting matching observations..."
               : matchingObservations > maxItems
-                ? `${numberFormatter(matchingObservations, 0)} observations in ${rangeDescription} — capping at ${numberFormatter(cappedCount, 0)}, newest first.`
-                : `${numberFormatter(matchingObservations, 0)} observations in ${rangeDescription}, all within your limit.`}
+                ? `${numberFormatter(matchingObservations, 0)} observations in ${rangeDescription} — capping at ${numberFormatter(cappedCount, 0)}, newest first.${samplingNote}`
+                : `${numberFormatter(matchingObservations, 0)} observations in ${rangeDescription}, all within your limit.${samplingNote}`}
           </p>
         </div>
       ) : null}

@@ -8,10 +8,12 @@ as "preset" placements.
 
 ## Entry Points
 
-- `web/src/pages/project/[projectId]/index.tsx` — Home. Controller resolves the
-  v3/v4 read path before anything mounts, then renders `HomeDashboard`.
-- `web/src/pages/project/[projectId]/dashboards/[dashboardId]/index.tsx` —
-  dashboard detail. Same controller split (`DashboardDetailView`).
+- `web/src/features/dashboard/ProjectHomePage.tsx` — Home (route shim at
+  `pages/.../index.tsx`). Controller resolves the v3/v4 read path before
+  anything mounts, then renders `HomeDashboard`.
+- `web/src/features/dashboard/DashboardDetailPage.tsx` — dashboard detail
+  (route shim at `pages/.../dashboards/[dashboardId]/index.tsx`). Same
+  controller split (`DashboardDetailView`).
 - Both pages create the per-mount scheduler store and provide it via
   `DashboardQuerySchedulerProvider`.
 
@@ -22,7 +24,7 @@ as "preset" placements.
   placements, plus dashboard-scoped dialogs/selectors. Cards receive a
   **required** `metricsVersion` from the preset context — they never read the
   session themselves.
-- `hooks/` — `useDashboardQueryScheduler.tsx`: the scheduler controller hook,
+- `hooks/` — `DashboardQuerySchedulerProvider.tsx`: the scheduler controller hook,
   provider/context, executeQuery cache policy, and
   `useScheduledDashboardExecuteQuery` (the one entry point widgets use to run
   a dashboard query under the concurrency budget, over tRPC or SSE).
@@ -62,7 +64,7 @@ because `parseSSEBuffer` has non-dashboard consumers).
 - Progress events re-render one widget's loading state at ClickHouse's
   progress cadence; they must never enter the query cache or context values.
 - The scheduler reset key must contain only query-affecting params — never the
-  widget set (`useDashboardQueryScheduler.clienttest.ts` pins this).
+  widget set (`DashboardQuerySchedulerProvider.clienttest.ts` pins this).
 
 ## Reliability Invariants
 

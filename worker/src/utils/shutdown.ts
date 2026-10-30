@@ -1,5 +1,6 @@
+/* eslint-disable @typescript-eslint/no-use-before-define */
 import { ClickHouseClientManager, logger } from "@langfuse/shared/src/server";
-import { redis } from "@langfuse/shared/src/server";
+import { disconnectAllRedisInstances } from "@langfuse/shared/src/server";
 
 import { ClickhouseWriter } from "../services/ClickhouseWriter";
 import { setSigtermReceived } from "../features/health";
@@ -15,15 +16,19 @@ import {
   batchProjectCleaners,
   batchDataRetentionCleaners,
   mediaRetentionCleaner,
+  inAppAgentRetentionCleaner,
   batchProjectMediaCleaner,
   batchProjectBlobCleaner,
   batchTraceDeletionCleaner,
   traceDeleteBatchActionRunner,
   inAppAgentIntegrityRunner,
   deletedMaskCleaner,
+  auditLogRelay,
   queueMetricsRunner,
   monitorRunners,
   inAppAgentDlqRetryRunner,
+  traceBatchDispatcher,
+  traceBatchMetricsRunner,
 } from "../app";
 
 export const onShutdown: NodeJS.SignalsListener = async (signal) => {
@@ -50,6 +55,9 @@ const runDrainAndClose = async () => {
   server?.close();
   logger.info("Server has been closed.");
 
+  // Give in-flight dispatch up to five seconds before continuing shutdown.
+  await traceBatchDispatcher?.drain();
+
   // Stop batch project cleaners
   for (const cleaner of batchProjectCleaners) {
     cleaner.stop();
@@ -62,6 +70,7 @@ const runDrainAndClose = async () => {
 
   // Stop media retention cleaner
   mediaRetentionCleaner?.stop();
+  inAppAgentRetentionCleaner?.stop();
 
   // Stop batch project media cleaner
   batchProjectMediaCleaner?.stop();
@@ -80,8 +89,11 @@ const runDrainAndClose = async () => {
   // Stop deleted-mask cleaner
   deletedMaskCleaner?.stop();
 
+  auditLogRelay?.stop();
+
   // Stop queue metrics runner
   queueMetricsRunner?.stop();
+  traceBatchMetricsRunner?.stop();
 
   // Stop monitor runners
   for (const runner of monitorRunners) {
@@ -105,11 +117,21 @@ const runDrainAndClose = async () => {
   await BackgroundMigrationManager.close();
 
   // Flush all pending writes to Clickhouse AFTER closing ingestion queue worker that is writing to it
-  await ClickhouseWriter.getInstance().shutdown();
+  await ClickhouseWriter.shutdownAll();
   logger.info("Clickhouse writer has been shut down.");
 
-  redis?.disconnect();
-  logger.info("Redis connection has been closed.");
+  await Promise.all([
+    inAppAgentRetentionCleaner?.drain(5_000),
+    inAppAgentIntegrityRunner?.drain(5_000),
+  ]);
+
+  // Closes the shared client and every per-queue client in one pass. Each
+  // queue holds its own client; without this they stay connected, retry
+  // forever, and keep the event loop alive so the process never exits.
+  const closedRedisConnections = disconnectAllRedisInstances();
+  logger.info(
+    `Redis connections have been closed (${closedRedisConnections} clients).`,
+  );
 
   await prisma.$disconnect();
   logger.info("Prisma connection has been closed.");

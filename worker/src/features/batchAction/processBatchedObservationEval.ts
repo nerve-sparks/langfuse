@@ -64,6 +64,7 @@ export async function processBatchedObservationEval(params: {
             schedulerDeps,
             executionMode: "MANUAL",
             executionScopeId: batchActionId,
+            batchActionId,
           });
         }),
       ),
@@ -111,12 +112,15 @@ export async function processBatchedObservationEval(params: {
     await processBatch(buffer);
   }
 
-  const finalStatus =
-    failedCount === 0
-      ? BatchActionStatus.Completed
-      : processedCount === 0
-        ? BatchActionStatus.Failed
-        : BatchActionStatus.Partial;
+  const finalStatus = (() => {
+    if (failedCount === 0) {
+      return BatchActionStatus.Completed;
+    }
+    if (processedCount === 0) {
+      return BatchActionStatus.Failed;
+    }
+    return BatchActionStatus.Partial;
+  })();
 
   const errorSummary =
     errors.length > 0

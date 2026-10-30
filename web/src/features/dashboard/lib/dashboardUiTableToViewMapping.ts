@@ -1,8 +1,9 @@
-import { z } from "zod";
-import { singleFilter } from "@langfuse/shared";
+/* eslint-disable @typescript-eslint/no-use-before-define */
+import type { z } from "zod";
+import { singleFilterList } from "@langfuse/shared";
 import { type views } from "@langfuse/shared/query";
 
-export const FilterArray = z.array(singleFilter);
+export const FilterArray = singleFilterList;
 
 /**
  * Central compatibility layer for dashboard/widget filter columns.
@@ -135,6 +136,16 @@ const viewFilterDefinitions: Record<
     defineField(
       "level",
       sourceSpec("Status", { uiTableId: "level", aliases: ["Level"] }),
+    ),
+    defineField(
+      "skillNamesAvailable",
+      sourceSpec("Skill Names (Available)", {
+        uiTableId: "skillNamesAvailable",
+      }),
+    ),
+    defineField(
+      "skillsNamesLoaded",
+      sourceSpec("Skill Names (Loaded)", { uiTableId: "skillsNamesLoaded" }),
     ),
     defineField(
       "toolNames",

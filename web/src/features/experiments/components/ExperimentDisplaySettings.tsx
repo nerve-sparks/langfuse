@@ -7,9 +7,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/src/components/ui/dropdown-menu";
-import { Button } from "@/src/components/ui/button";
-import { Settings2, Check } from "lucide-react";
 import { type IoRenderMode } from "@/src/components/table/data-table-io-render-mode-switch";
+import { Button } from "@/src/components/ui/button";
+import { Settings2, Check } from "@langfuse/icons";
 import {
   type ExperimentDiffMode,
   type ExperimentResultsLayout,
@@ -42,7 +42,7 @@ const OptionItem = ({
 }) => (
   <DropdownMenuItem onClick={onSelect} disabled={disabled}>
     {selected ? (
-      <Check className="mr-2 h-4 w-4 shrink-0" />
+      <Check size="base" color="default" __rawClassName="mr-2" />
     ) : (
       <span className="mr-2 h-4 w-4 shrink-0" />
     )}
@@ -50,6 +50,13 @@ const OptionItem = ({
   </DropdownMenuItem>
 );
 
+/**
+ * The shape of the comparison, as one menu: which layout, what each cell's
+ * second line is measured against, and whether items missing from the baseline
+ * are listed.
+ *
+ * Comparison settings travel with a shared URL; cell format is stored locally.
+ */
 export function ExperimentDisplaySettings({
   layout,
   onLayoutChange,
@@ -67,9 +74,9 @@ export function ExperimentDisplaySettings({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline">
-          <Settings2 className="h-4 w-4" />
-          <span className="ml-2 hidden md:inline">Display</span>
+        <Button variant="outline" className="h-8 px-2.5 text-xs">
+          <Settings2 size="base" color="default" />
+          <span className="ml-2">Display</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
@@ -78,19 +85,35 @@ export function ExperimentDisplaySettings({
           selected={layout === "list"}
           onSelect={() => onLayoutChange("list")}
         >
-          Diff — one row per item
+          List view: one column per metric
         </OptionItem>
         <OptionItem
           selected={layout === "grid"}
           onSelect={() => onLayoutChange("grid")}
         >
-          Side by side — a column per experiment
+          Grid view: one column per experiment
         </OptionItem>
         <OptionItem
           selected={layout === "matrix"}
           onSelect={() => onLayoutChange("matrix")}
         >
-          Score matrix — scores as rows, runs as columns
+          Score matrix: scores as rows, runs as columns
+        </OptionItem>
+
+        <DropdownMenuSeparator />
+
+        <DropdownMenuLabel>Cell format</DropdownMenuLabel>
+        <OptionItem
+          selected={ioRenderMode === "json"}
+          onSelect={() => onIoRenderModeChange("json")}
+        >
+          JSON
+        </OptionItem>
+        <OptionItem
+          selected={ioRenderMode === "text"}
+          onSelect={() => onIoRenderModeChange("text")}
+        >
+          Formatted
         </OptionItem>
 
         <DropdownMenuSeparator />
@@ -131,22 +154,6 @@ export function ExperimentDisplaySettings({
           onSelect={() => onItemVisibilityChange("all")}
         >
           Show all items
-        </OptionItem>
-
-        <DropdownMenuSeparator />
-
-        <DropdownMenuLabel>Format</DropdownMenuLabel>
-        <OptionItem
-          selected={ioRenderMode === "json"}
-          onSelect={() => onIoRenderModeChange("json")}
-        >
-          JSON
-        </OptionItem>
-        <OptionItem
-          selected={ioRenderMode === "text"}
-          onSelect={() => onIoRenderModeChange("text")}
-        >
-          Formatted
         </OptionItem>
       </DropdownMenuContent>
     </DropdownMenu>

@@ -1,4 +1,5 @@
 export { ApiAuthService } from "./apiAuth";
+export { authenticateOrganizationApiRequest } from "./authenticateOrganizationApiRequest";
 export { createAuthedProjectAPIRoute } from "./createAuthedProjectAPIRoute";
 export { createOrFetchDatasetRun } from "./dataset-runs";
 export {
@@ -162,3 +163,21 @@ export {
   PostDashboardPlacementBody,
   PostUnstableDashboardBody,
 } from "../types/unstable-dashboards";
+export { __dangerouslySkipAuthz, type ApiAction } from "./enforceAuth";
+export {
+  isPublicApiEvaluatorType,
+  toApiReadMappings,
+  toPublicEvaluatorType,
+  toStoredMappingList,
+} from "./evaluation/evaluationAdapters";
+export {
+  shadowAuth,
+  shadowAuthorize,
+  type ShadowAuthParams,
+} from "./shadowAuth";
+export { writeOrgError, writeProjectError, writeScimError } from "./writeError";
+export {
+  ObservationPromptVariableMappingInput,
+  PromptVariableMappingRead,
+  PublicEvaluatorType,
+} from "../types/evaluation/publicEvalsContract";

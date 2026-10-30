@@ -38,6 +38,7 @@ declare module "next-auth" {
             id: PrismaOrganization["id"];
             name: PrismaOrganization["name"];
             role: Role;
+            supportAccess?: boolean; // granted through a ConductorOne support access request, not a real membership
             cloudConfig: CloudConfigSchema | undefined;
             plan: Plan;
             metadata: Record<string, unknown>;
@@ -50,6 +51,8 @@ declare module "next-auth" {
               deletedAt: PrismaProject["deletedAt"];
               retentionDays: PrismaProject["retentionDays"];
               hasTraces: PrismaProject["hasTraces"];
+              topicsEnabled?: boolean; // deployment allowlist, resolved server-side; absent = off
+              scoreEditsDisabled?: boolean; // scores are read without dedup, so existing scores stay immutable; absent = off
               metadata: Record<string, unknown>;
               role: Role; // include only projects where user has a role
               createdAt: string; // iso datetime string — JWT does not support Date objects
@@ -70,6 +73,10 @@ declare module "next-auth" {
       // opt out of product traces. Optional so existing session mocks need
       // not set it.
       aiFeaturesTracingConfigured?: boolean;
+      // False only on self-hosted instances without LANGFUSE_AI_GATEWAY_DEPLOYED;
+      // Cloud, development and preview always run a gateway. Optional so
+      // existing session mocks need not set it.
+      aiGatewayDeployed?: boolean;
       // Enables features that are only available under an enterprise/commercial license when self-hosting Langfuse
       selfHostedInstancePlan: Plan | null;
       // V4 migration write mode. Mirrors LANGFUSE_MIGRATION_V4_WRITE_MODE so the
@@ -78,6 +85,9 @@ declare module "next-auth" {
       // Optional so existing session mocks need not set it; the real session
       // callback always populates it.
       v4WriteMode?: "legacy" | "dual" | "events_only";
+      // Role selection requires API_AUTH_MIGRATION=enforce and the scope's rollout flag.
+      apiKeyProjectRoleSelectionEnabled?: boolean;
+      apiKeyOrgRoleSelectionEnabled?: boolean;
     };
   }
 
@@ -92,5 +102,6 @@ declare module "next-auth/jwt" {
     name?: string | null;
     email?: string | null;
     image?: string | null;
+    loginAt?: number;
   }
 }

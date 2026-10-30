@@ -1,4 +1,14 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { LayerProvider } from "@/src/context/LayerContext/LayerContext";
+
+vi.stubGlobal(
+  "ResizeObserver",
+  class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  },
+);
 
 const existingRow = {
   id: "auto-1",
@@ -18,6 +28,10 @@ let automations: (typeof existingRow)[] = [];
 
 /** gateFetch defers the post-create list read so a test can interleave user input. */
 let gateFetch: Promise<unknown> | undefined;
+
+vi.mock("next-auth/react", () => ({
+  useSession: () => ({ data: null, status: "unauthenticated" }),
+}));
 
 vi.mock("@/src/utils/api", () => ({
   api: {
@@ -48,7 +62,7 @@ type SuccessHandler = (
 /** stubSave stands in for the real form, whose contract with the panel is "prefill in, onSuccess out". */
 let stubSave: (onSuccess: SuccessHandler) => void;
 
-vi.mock("@/src/features/automations/components/automationForm", () => ({
+vi.mock("@/src/features/automations/components/AutomationForm", () => ({
   AutomationForm: ({ onSuccess }: { onSuccess: SuccessHandler }) => (
     <button onClick={() => stubSave(onSuccess)}>stub save</button>
   ),
@@ -58,9 +72,7 @@ import { MonitorAutomationsPanel } from "./MonitorAutomationsPanel";
 
 /** openCreateDialog opens the "+ Automation" menu and picks one of its items. */
 const openCreateDialog = async (item: RegExp) => {
-  fireEvent.keyDown(screen.getByRole("button", { name: /^automation$/i }), {
-    key: "Enter",
-  });
+  fireEvent.click(screen.getByRole("button", { name: /^automation$/i }));
   fireEvent.click(await screen.findByRole("menuitem", { name: item }));
 };
 
@@ -82,6 +94,7 @@ describe("MonitorAutomationsPanel automation creation", () => {
         triggerIds={["trig-1"]}
         onTriggerIdsChange={onTriggerIdsChange}
       />,
+      { wrapper: LayerProvider },
     );
 
     await openCreateDialog(/new automation/i);
@@ -107,7 +120,7 @@ describe("MonitorAutomationsPanel automation creation", () => {
         onTriggerIdsChange={onTriggerIdsChange}
       />
     );
-    const { rerender } = render(panel());
+    const { rerender } = render(panel(), { wrapper: LayerProvider });
 
     await openCreateDialog(/^webhook$/i);
     // The create invalidates the list, so the first automation lands while the
@@ -142,7 +155,7 @@ describe("MonitorAutomationsPanel automation creation", () => {
         onTriggerIdsChange={onTriggerIdsChange}
       />
     );
-    const { rerender } = render(panel([]));
+    const { rerender } = render(panel([]), { wrapper: LayerProvider });
 
     await openCreateDialog(/new automation/i);
     fireEvent.click(await screen.findByRole("button", { name: /stub save/i }));

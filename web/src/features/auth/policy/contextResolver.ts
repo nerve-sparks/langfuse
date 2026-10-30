@@ -1,33 +1,49 @@
-import { type ApiKey } from "@langfuse/shared/src/db";
+import {
+  Prisma,
+  type ApiKey,
+  type PrismaClient,
+  prisma as defaultPrisma,
+} from "@langfuse/shared/src/db";
 import { CloudConfigSchema, InternalServerError } from "@langfuse/shared";
+import {
+  ApiKeyId,
+  OrganizationId,
+  ProjectId,
+  SystemRoleId,
+  systemRoleAccessRights,
+} from "@langfuse/shared/rbac";
 
-import { apiKeyAccessRights } from "@/src/features/rbac/constants/apiKeyAccessRights";
-import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server/getPlan";
+import { assignRole } from "@langfuse/shared/rbac/server";
+
+import { getRolesForPrincipal } from "@/src/features/rbac/getRolesForPrincipal";
+import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server";
 import {
   OrganizationRepository,
   type GetOrganizationResult,
   type OrganizationWithProjects,
 } from "./organizationRepository";
+import { authorize } from "@/src/features/rbac/authorize";
+import { type Policy, type Role } from "@/src/features/rbac/types";
 import {
-  wildcard,
+  internalServerError,
   type AuthorizationContext,
+  type BoundResource,
   type ErrorResult,
-  type Policy,
   type Principal,
   type PrincipalOrganization,
-  type Resource,
   type Success,
-  type SystemPolicy,
 } from "./types";
 
 /** ContextResolver materializes an authenticated credential into its `AuthorizationContext`, loading and enriching the org it implies. */
 export class ContextResolver {
   constructor(
     private readonly orgs: OrganizationRepository = new OrganizationRepository(),
+    private readonly prisma: PrismaClient = defaultPrisma,
   ) {}
 
   /** resolve turns a verified credential into its context, collapsing a missing org to a 500 invariant break. */
   async resolve(params: ResolveContextParams): Promise<Resolved> {
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- Compatibility until the next major version.
     if (params.authorization === "admin") {
       return { success: true, context: adminContext() };
     }
@@ -35,10 +51,12 @@ export class ContextResolver {
     if (!org.success) return org;
     return {
       success: true,
-      context: materialize(
+      context: await materialize(
         params.apiKey,
+        // eslint-disable-next-line @typescript-eslint/no-deprecated -- Compatibility until the next major version.
         params.authorization,
         org.organization,
+        this.prisma,
       ),
     };
   }
@@ -53,12 +71,9 @@ export class ContextResolver {
     const found = await this.loadOrganization(apiKey);
     if (!found.success) return found;
     if (!found.organization) {
-      return {
-        success: false,
-        error: new InternalServerError(
-          `verified key ${apiKey.id} resolved to no organization`,
-        ),
-      };
+      return internalServerError(
+        `verified key ${apiKey.id} resolved to no organization`,
+      );
     }
     return {
       success: true,
@@ -72,31 +87,24 @@ export class ContextResolver {
   ): Promise<GetOrganizationResult> {
     if (apiKey.scope === "ORGANIZATION") {
       if (apiKey.orgId === null) {
-        return {
-          success: false,
-          error: new InternalServerError(`org key ${apiKey.id} has no orgId`),
-        };
+        return internalServerError(`org key ${apiKey.id} has no orgId`);
       }
       return this.orgs.getOrganizationByOrgId(apiKey.orgId);
     }
     if (apiKey.projectId === null) {
-      return {
-        success: false,
-        error: new InternalServerError(
-          `project key ${apiKey.id} has no projectId`,
-        ),
-      };
+      return internalServerError(`project key ${apiKey.id} has no projectId`);
     }
     return this.orgs.getOrganizationByProjectId(apiKey.projectId);
   }
 }
 
 /** materialize expands the `ApiKey` row and its presentation into the policies the credential implies. */
-function materialize(
+async function materialize(
   apiKey: ApiKey,
   authorization: "publicKey" | "privateKey",
   org: PrincipalOrganization,
-): AuthorizationContext {
+  prisma: PrismaClient,
+): Promise<AuthorizationContext> {
   const principal: Principal = {
     kind: "apiKey",
     apiKeyId: apiKey.id,
@@ -106,24 +114,125 @@ function materialize(
     scope: apiKey.scope,
     presentation: authorization,
     organizations: [org],
-    boundResource: boundResourceFor(apiKey),
+    boundResource: boundResourceFor(apiKey, org),
   };
 
-  const grants =
-    authorization === "publicKey"
-      ? apiKeyAccessRights.SCORES_INGEST
-      : apiKeyAccessRights[apiKey.scope];
-  const policies = grants.map((p) => bind(p, principal));
+  const roles = await getRolesForApiKey(apiKey.id);
+  const context = {
+    principal,
+    policies: roles.flatMap((role) => role.policies),
+  };
+  if (authorization === "publicKey") {
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- Compatibility until the next major version.
+    return { principal, policies: publicBearerPolicies(context, apiKey, org) };
+  }
+  return context;
+
+  /** getRolesForApiKey restores missing assignments and rejects an empty result after repair. */
+  async function getRolesForApiKey(apiKeyId: string): Promise<Role[]> {
+    let roles = await getRolesForPrincipal(prisma, ApiKeyId(apiKeyId));
+    if (roles.length === 0) {
+      // eslint-disable-next-line @typescript-eslint/no-deprecated -- Compatibility until the next major version.
+      await backfillApiKeyRoleAssignment(prisma, apiKey, org);
+      roles = await getRolesForPrincipal(prisma, ApiKeyId(apiKeyId));
+    }
+    if (roles.length === 0) {
+      throw new InternalServerError(
+        `API key ${apiKeyId} has no role assignments after backfill`,
+      );
+    }
+    return roles;
+  }
+}
+
+/**
+ * backfillApiKeyRoleAssignment restores a verified key's legacy role.
+ * @deprecated RoleAssignment backfill will be removed in the next major version.
+ */
+async function backfillApiKeyRoleAssignment(
+  prisma: PrismaClient,
+  apiKey: ApiKey,
+  org: PrincipalOrganization,
+): Promise<void> {
+  const isProject = apiKey.scope === "PROJECT";
+  await assignRole(prisma, {
+    tenantId: OrganizationId(org.orgId),
+    principalId: ApiKeyId(apiKey.id),
+    ownerId: isProject
+      ? ProjectId(apiKey.projectId!)
+      : OrganizationId(apiKey.orgId!),
+    roleId: SystemRoleId(
+      isProject ? "LEGACY_PROJECT_API_KEY" : "LEGACY_ORGANIZATION_API_KEY",
+    ),
+    tags: [],
+  }).catch((error: unknown) => {
+    if (!isUniqueConstraintFailedError(error)) throw error;
+  });
+}
+
+/** isUniqueConstraintFailedError identifies Prisma's P2002 uniqueness violation. */
+function isUniqueConstraintFailedError(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  );
+}
+
+/**
+ * publicBearerPolicies narrows a public-key bearer to scores:save on its own project, granted only when the key's stored roles allow it there.
+ * @deprecated Public bearer authentication will be removed in the next major version.
+ */
+function publicBearerPolicies(
+  roleContext: AuthorizationContext,
+  apiKey: ApiKey,
+  org: PrincipalOrganization,
+): Policy[] {
+  const tenantId = OrganizationId(org.orgId);
+  const project = ProjectId(apiKey.projectId!);
+  if (!authorize(roleContext, tenantId, "scores:save", project).success) {
+    return [];
+  }
+  const resources = [project];
+  const roleId = SystemRoleId("SCORES_INGEST");
+  return systemRoleAccessRights.SCORES_INGEST.policies.map((policy) => ({
+    id: `${roleId}:${policy.resourceKind}`,
+    roleId,
+    tenantId,
+    effect: policy.effect,
+    actions: policy.actions,
+    resources,
+  }));
+}
+
+/** adminContext grants the admin principal OWNER permissions across all tenants. */
+function adminContext(): AuthorizationContext {
+  const principal: Principal = { kind: "admin", userId: null };
+  const roleId = SystemRoleId("OWNER");
+  const tenantId = OrganizationId("*");
+  const policies: Policy[] = systemRoleAccessRights.OWNER.policies.map(
+    (policy) => ({
+      id: `${roleId}:${policy.resourceKind}`,
+      roleId,
+      tenantId,
+      effect: policy.effect,
+      actions: policy.actions,
+      resources: [
+        policy.resourceKind === "organization"
+          ? OrganizationId("*")
+          : ProjectId("*"),
+      ],
+    }),
+  );
   return { principal, policies };
 }
 
-/** adminContext is the admin context: no key row, the ADMIN role bound to the wildcard resource. */
-function adminContext(): AuthorizationContext {
-  const principal: Principal = { kind: "admin", userId: null };
-  return {
-    principal,
-    policies: apiKeyAccessRights.ADMIN.map((policy) => bind(policy, principal)),
-  };
+/** boundResourceFor is the target a request resolves against with no header: the key's org, narrowed to its project when the key is project-scoped. */
+function boundResourceFor(
+  apiKey: ApiKey,
+  org: PrincipalOrganization,
+): BoundResource {
+  if (apiKey.scope === "ORGANIZATION") return { orgId: org.orgId };
+  return { orgId: org.orgId, projectId: apiKey.projectId! };
 }
 
 /** toPrincipalOrganization derives an org's `PrincipalOrganization` caps and liveness from its raw row. */
@@ -133,6 +242,7 @@ function toPrincipalOrganization(
   const cloudConfig = getCloudConfig(org);
   return {
     orgId: org.id,
+    organizationCreatedAt: org.createdAt.toISOString(),
     plan: getOrganizationPlanServerSide(cloudConfig),
     rateLimitOverrides: cloudConfig?.rateLimitOverrides ?? [],
     projectIds: org.projects.map((p) => p.id),
@@ -147,47 +257,10 @@ function getCloudConfig(
   return org.cloudConfig ? CloudConfigSchema.parse(org.cloudConfig) : undefined;
 }
 
-/** bind fixes a resource-less SystemPolicy to the resources the principal covers, by the policy's kind. */
-function bind(policy: SystemPolicy, principal: Principal): Policy {
-  return policy.kind === "organization"
-    ? { ...policy, resources: orgResources(principal) }
-    : { ...policy, resources: projectResources(principal) };
-}
-
-/** projectResources are the project ids a project-kind policy binds to: the bound project, the bound org's projects, or the wildcard for admin. */
-function projectResources(principal: Principal): Policy["resources"] {
-  if (principal.kind === "admin") return wildcard;
-  const bound =
-    principal.kind === "apiKey" ? principal.boundResource : undefined;
-  if (bound && "projectId" in bound) return [bound.projectId];
-  const orgs =
-    bound && "orgId" in bound
-      ? principal.organizations.filter((o) => o.orgId === bound.orgId)
-      : principal.organizations;
-  return orgs.flatMap((o) => o.projectIds);
-}
-
-/** orgResources are the org ids an org-kind policy binds to: the bound org, or the wildcard for admin. */
-function orgResources(principal: Principal): Policy["resources"] {
-  if (principal.kind === "admin") return wildcard;
-  const bound =
-    principal.kind === "apiKey" ? principal.boundResource : undefined;
-  const orgs =
-    bound && "orgId" in bound
-      ? principal.organizations.filter((o) => o.orgId === bound.orgId)
-      : principal.organizations;
-  return orgs.map((o) => o.orgId);
-}
-
-/** boundResourceFor is the legacy single-target a request resolves against with no header. */
-function boundResourceFor(apiKey: ApiKey): Resource {
-  if (apiKey.scope === "ORGANIZATION") return { orgId: apiKey.orgId! };
-  return { projectId: apiKey.projectId! };
-}
-
 /** ResolveContextParams is a verified credential: an api key with how it was presented, or the admin key. */
 export type ResolveContextParams =
   | {
+      /** @deprecated Remove in the next major version when all API-key authentication is private. */
       authorization: "publicKey" | "privateKey";
       apiKey: ApiKey;
     }

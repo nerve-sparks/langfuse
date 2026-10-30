@@ -1,7 +1,10 @@
+/* eslint-disable @typescript-eslint/no-deprecated -- Legacy UI usage retained during migration to design-system components. */
 import { useCallback, useMemo, useRef, useState } from "react";
-import { Check, ChevronDown, ChevronRight, X } from "lucide-react";
-import { MultiSelectCombobox } from "@/src/components/ui/multi-select-combobox";
-import { Badge } from "@/src/components/ui/badge";
+import { Check, X } from "@langfuse/icons";
+import { DropdownIndicator } from "@/src/components/design-system/DropdownIndicator/DropdownIndicator";
+import { MultiSelectCombobox } from "@/src/components/ui/MultiSelectCombobox";
+import { Badge } from "@/src/components/design-system/Badge/Badge";
+import { ExperimentRunBadge } from "./ExperimentRunBadge";
 import {
   Tooltip,
   TooltipContent,
@@ -23,6 +26,8 @@ import {
   NO_DATASET_LABEL,
   UNNAMED_DATASET_LABEL,
 } from "@/src/features/experiments/constants/comparison";
+import { getExperimentColorStyles } from "./table/types";
+import { cn } from "@/src/utils/tailwind";
 
 export type ExperimentOption = Omit<ExperimentNameOption, "startTime"> & {
   /** null when an id in the URL no longer resolves to a run. */
@@ -73,6 +78,8 @@ type ExperimentComparisonSelectorProps = {
   projectId: string;
   baselineExperimentId?: string;
   selectedIds: string[];
+  /** The run order the table's cells colour by. See `useExperimentResultsState`. */
+  colorExperimentIds: string[];
   selectedExperimentCount: number;
   onSelectedIdsChange: (ids: string[]) => void;
   isAutoSelectEnabled: boolean;
@@ -83,6 +90,7 @@ export function ExperimentComparisonSelector({
   projectId,
   baselineExperimentId,
   selectedIds,
+  colorExperimentIds,
   selectedExperimentCount,
   onSelectedIdsChange,
   isAutoSelectEnabled,
@@ -350,7 +358,7 @@ export function ExperimentComparisonSelector({
                 className="text-muted-foreground hover:bg-muted/50 flex w-full items-center gap-3 px-3 py-2 text-left"
               >
                 <div className="border-input flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border">
-                  {isAutoSelectEnabled && <Check className="h-3 w-3" />}
+                  {isAutoSelectEnabled && <Check size="sm" />}
                 </div>
                 <span className="text-xs">
                   Auto-select a comparison experiment by default
@@ -372,9 +380,9 @@ export function ExperimentComparisonSelector({
                 className="bg-muted/40 hover:bg-muted flex w-full items-center gap-2 px-2 py-1.5 text-left"
               >
                 {row.isExpanded ? (
-                  <ChevronDown className="h-3 w-3 shrink-0" />
+                  <DropdownIndicator size="sm" nudge />
                 ) : (
-                  <ChevronRight className="h-3 w-3 shrink-0" />
+                  <DropdownIndicator direction="right" size="sm" nudge />
                 )}
                 <span className="truncate text-xs font-bold" title={row.label}>
                   {row.label}
@@ -404,7 +412,9 @@ export function ExperimentComparisonSelector({
               className="hover:bg-muted/50 flex w-full items-center gap-3 px-3 py-2 text-left disabled:cursor-not-allowed disabled:opacity-50"
             >
               <div className="flex h-4 w-4 shrink-0 items-center justify-center">
-                {isSelected && <Check className="text-primary h-4 w-4" />}
+                {isSelected && (
+                  <Check size="base" __rawClassName="text-primary " />
+                )}
               </div>
               <span
                 className="min-w-0 flex-1 truncate text-sm font-bold"
@@ -413,14 +423,10 @@ export function ExperimentComparisonSelector({
                 {option.experimentName}
               </span>
               {row.isBaseline && (
-                <Badge variant="outline" className="shrink-0 text-[10px]">
-                  BASELINE
-                </Badge>
+                <Badge color="primary" size="sm" text="BASELINE" />
               )}
               {row.isLatest && (
-                <Badge variant="outline" className="shrink-0 text-[10px]">
-                  LATEST
-                </Badge>
+                <Badge color="primary" size="sm" text="LATEST" />
               )}
               {option.startTime && (
                 <span
@@ -445,11 +451,9 @@ export function ExperimentComparisonSelector({
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Badge
-                    variant="secondary"
-                    className="shrink-0 px-2 py-0.5 text-xs"
-                  >
-                    +{hiddenSelectedOptions.length}
-                  </Badge>
+                    color="filled"
+                    text={`+${hiddenSelectedOptions.length}`}
+                  />
                 </TooltipTrigger>
                 <TooltipContent className="max-w-[280px]">
                   {hiddenSelectedOptions.map((hidden) => (
@@ -482,11 +486,23 @@ export function ExperimentComparisonSelector({
             .filter(Boolean)
             .join("\n");
 
+          // Same run, same colour as its values in the table — resolved from the
+          // order the cells use, never from this chip's own position. Absent when
+          // the cells show no colour at all (no baseline to compare against).
+          const colorStyles = colorExperimentIds.includes(option.experimentId)
+            ? getExperimentColorStyles(option.experimentId, colorExperimentIds)
+            : undefined;
+
           return (
-            <Badge
-              variant="secondary"
-              className="flex shrink-0 items-center gap-1 px-2 py-0.5"
-            >
+            <ExperimentRunBadge colorClass={colorStyles?.badgeClass}>
+              {colorStyles && (
+                <span
+                  className={cn(
+                    "block h-3 w-0.5 shrink-0 rounded-full",
+                    colorStyles.markerClass,
+                  )}
+                />
+              )}
               <span className="max-w-40 truncate text-xs" title={chipTitle}>
                 {option.experimentName}
               </span>
@@ -507,9 +523,9 @@ export function ExperimentComparisonSelector({
                 className="hover:bg-muted ml-0.5 rounded-full"
                 aria-label={`Remove ${option.experimentName}`}
               >
-                <X className="h-3 w-3" />
+                <X size="sm" />
               </button>
-            </Badge>
+            </ExperimentRunBadge>
           );
         }}
       />
