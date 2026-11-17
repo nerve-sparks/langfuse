@@ -655,6 +655,7 @@ export class OtelIngestionProcessor {
                     input,
                     output,
                     isError: level === ObservationLevel.ERROR,
+                    metadata,
                     projectId: this.projectId,
                   }),
                   promptName: canLinkPrompt
@@ -1356,6 +1357,7 @@ export class OtelIngestionProcessor {
         input,
         output,
         isError: level === ObservationLevel.ERROR,
+        metadata,
         projectId: this.projectId,
       }),
       promptName: canLinkPrompt
@@ -2886,7 +2888,9 @@ export class OtelIngestionProcessor {
       const providerMetadata = this.parseJsonPayload(
         attributes["ai.response.providerMetadata"],
       );
-      const responseServiceTier = providerMetadata?.openai?.serviceTier;
+      const responseServiceTier =
+        providerMetadata?.openai?.serviceTier ??
+        this.getGoogleServiceTier(providerMetadata);
 
       return {
         maxSteps:
@@ -2976,6 +2980,21 @@ export class OtelIngestionProcessor {
         return acc;
       }, {}),
     );
+  }
+
+  private getGoogleServiceTier(providerMetadata: any): string | undefined {
+    // The AI SDK writes Vertex metadata under `googleVertex` and `vertex`
+    // (older versions used `google`), and Gemini API metadata under `google`.
+    // The Gemini API reports the tier as `serviceTier` ("flex"); Vertex AI
+    // reports it as `usageMetadata.trafficType` ("ON_DEMAND_FLEX"). Pricing
+    // tier conditions list both spellings.
+    const google =
+      providerMetadata?.googleVertex ??
+      providerMetadata?.vertex ??
+      providerMetadata?.google;
+    const tier = google?.serviceTier ?? google?.usageMetadata?.trafficType;
+
+    return typeof tier === "string" ? tier : undefined;
   }
 
   private sanitizeModelParams<T>(params: T): Record<string, string> | T {
